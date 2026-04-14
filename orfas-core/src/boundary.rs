@@ -22,7 +22,7 @@ impl BoundaryConditionMethod for PenaltyMethod {
         for &node in fixed_nodes {
             for dir in 0..3 {
                 let i = 3 * node + dir;
-                k[(i,i)] = 1e12;
+                k[(i,i)] = 1e30;
                 f[i] = 0.0;
             }
         }

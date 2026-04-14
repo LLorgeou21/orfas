@@ -29,15 +29,15 @@ pub struct Mesh {
 impl Mesh {
 
     /// Fn to generate a mesh for FEM
-    /// Used in early version for debugging and to speed the dev
-    /// Define the mesh by giving the numbers of nodes in each dimensions and the distance between them in each dimension
-    /// No point is fixed by default
-    /// Uses an alternating 5-tetrahedra decomposition per cube to avoid degenerate elements
+    /// Node index formula: i + j*nx + k*nx*ny
+    /// where i in 0..nx (x-axis), j in 0..ny (y-axis), k in 0..nz (z-axis)
+    /// Loop order matches the formula: k outermost, j middle, i innermost
     pub fn generate(nx: usize, ny: usize, nz: usize, dx: f64, dy: f64, dz: f64) -> Mesh {
         let mut nodes = Vec::new();
-        for i in 0..nx {
+        // Loop order matches index formula: i + j*nx + k*nx*ny
+        for k in 0..nz {
             for j in 0..ny {
-                for k in 0..nz {
+                for i in 0..nx {
                     let position = Vector3::new(i as f64 * dx, j as f64 * dy, k as f64 * dz);
                     nodes.push(Node { position, fixed: false });
                 }
@@ -96,5 +96,22 @@ mod tests {
         assert_eq!(mesh.nodes.len(), 27);
         assert_eq!(mesh.elements.len(), 48);
     }
-}
 
+    #[test]
+    fn test_node_positions() {
+        // Verify that node index formula i + j*nx + k*nx*ny matches actual positions
+        let nx = 3; let ny = 3; let nz = 3;
+        let mesh = Mesh::generate(nx, ny, nz, 1.0, 1.0, 1.0);
+        for k in 0..nz {
+            for j in 0..ny {
+                for i in 0..nx {
+                    let idx = i + j * nx + k * nx * ny;
+                    let pos = &mesh.nodes[idx].position;
+                    assert_eq!(pos.x, i as f64, "bad x at idx={}", idx);
+                    assert_eq!(pos.y, j as f64, "bad y at idx={}", idx);
+                    assert_eq!(pos.z, k as f64, "bad z at idx={}", idx);
+                }
+            }
+        }
+    }
+}
