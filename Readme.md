@@ -3,7 +3,7 @@
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Status: Pre-Alpha](https://img.shields.io/badge/Status-Pre--Alpha-red.svg)]()
-[![Rust](https://img.shields.io/badge/Rust-2021%20Edition-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/Rust-2024%20Edition-orange.svg)](https://www.rust-lang.org/)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)]()
 
 > *A generic, extensible Finite Element Method framework written in Rust, with a primary focus on medical and biomechanical simulation.*
@@ -116,7 +116,7 @@ pub trait Solver {
 
 | Version | Status | Description |
 |---------|--------|-------------|
-| **v0.1** | 🟡 In Validation | FEM statique 3D, élasticité linéaire, maillage tétraédrique, solveur direct, viewer egui basique |
+| **v0.1** | ✅ Validated | Static 3D FEM, linear elasticity, tetrahedral mesh, direct solver, basic egui viewer |
 | **v0.2** | ⬜ Planned | External mesh loading (`.vtk`, `.obj`), configurable boundary conditions |
 | **v0.3** | ⬜ Planned | Dynamic simulation, implicit Euler time integration |
 | **v0.4** | ⬜ Planned | Nonlinear material laws: Neo-Hookean, Saint Venant-Kirchhoff |
@@ -153,7 +153,13 @@ cargo build --release
 cargo run -p orfas-viewer -- --width 4 --height 4 --depth 4 --youngs-modulus 1e6 --poisson 0.45
 ```
 
-*Full usage documentation will be added as v0.1 stabilizes.*
+### Run the tests
+
+```bash
+cargo test
+```
+
+Numerical validation results are documented in [VALIDATION.md](VALIDATION.md).
 
 ---
 
