@@ -1,4 +1,5 @@
 use nalgebra::{DMatrix, DVector, linalg::Cholesky};
+use nalgebra::linalg::LU;
 
 
 /// Defines the interface for linear system solvers.
@@ -15,6 +16,7 @@ pub trait Solver {
 
 
 /// Groups all errors that can occur during solving.
+#[derive(Debug)]
 pub enum SolverError {
     /// K is singular and cannot be inverted.
     /// This typically happens when boundary conditions are insufficient
@@ -29,8 +31,7 @@ pub struct DirectSolver;
 
 impl Solver for DirectSolver {
     fn solve(&self, k: &DMatrix<f64>, f: &DVector<f64>) -> Result<DVector<f64>, SolverError> {
-        let chol = Cholesky::new(k.clone())
-            .ok_or(SolverError::SingularMatrix)?;
-        Ok(chol.solve(f))
+        let lu = LU::new(k.clone());
+        lu.solve(f).ok_or(SolverError::SingularMatrix)
     }
 }

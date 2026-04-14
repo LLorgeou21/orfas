@@ -80,6 +80,9 @@ pub fn tetra_stiffness_matrix<B: BMatrix>(
     deformation: Option<&Matrix6<f64>>
 ) -> SMatrix<f64, 12, 12> {
     let volume = tetra_volume(p0, p1, p2, p3);
+    if volume < 1e-10 {
+        return SMatrix::zeros();
+    }
     let b_mat = B::compute(p0, p1, p2, p3, deformation);
     let c_mat = material.stiffness_matrix(deformation);
     b_mat.transpose() * c_mat * b_mat * volume
