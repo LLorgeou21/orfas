@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "orfas-core",
+    "orfas-viewer",
+    "orfas-io",
+]
+resolver = "2"

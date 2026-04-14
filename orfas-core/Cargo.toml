@@ -1,0 +1,8 @@
+[package]
+name = "orfas-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+nalgebra = "0.34.2"
+faer = "0.24.0"
