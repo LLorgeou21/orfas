@@ -116,7 +116,7 @@ pub trait Solver {
 
 | Version | Status | Description |
 |---------|--------|-------------|
-| **v0.1** | 🔴 In Progress | Static 3D FEM, linear elasticity, tetrahedral mesh, direct solver, egui viewer |
+| **v0.1** | 🟡 In Validation | FEM statique 3D, élasticité linéaire, maillage tétraédrique, solveur direct, viewer egui basique |
 | **v0.2** | ⬜ Planned | External mesh loading (`.vtk`, `.obj`), configurable boundary conditions |
 | **v0.3** | ⬜ Planned | Dynamic simulation, implicit Euler time integration |
 | **v0.4** | ⬜ Planned | Nonlinear material laws: Neo-Hookean, Saint Venant-Kirchhoff |
