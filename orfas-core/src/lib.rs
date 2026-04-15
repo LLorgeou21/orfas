@@ -11,7 +11,7 @@ mod integration_tests {
     use crate::mesh::Mesh;
     use crate::material::LinearElastic;
     use crate::assembler::{Assembler, LinearBMatrix};
-    use crate::boundary::{BoundaryConditions, PenaltyMethod};
+    use crate::boundary::{BoundaryConditions, PenaltyMethod,FixedNode,BoundaryConditionResult};
     use crate::solver::{DirectSolver, Solver};
     use nalgebra::DVector;
 
@@ -25,7 +25,10 @@ mod integration_tests {
                 mesh.nodes[idx].fixed = true;
             }
         }
-        let fixed_nodes = vec![0, 1, 2, 3];
+        let fixed_nodes = vec![FixedNode::all(0) ,
+                                               FixedNode::all(1),
+                                               FixedNode::all(2),
+                                               FixedNode::all(3)];
         let bc = BoundaryConditions::new(fixed_nodes, Box::new(PenaltyMethod));
         let n = 3 * mesh.nodes.len();
         let mut f = DVector::zeros(n);
@@ -35,11 +38,14 @@ mod integration_tests {
             f[3 * node_idx + 2] = force;
         }
         let assembler = Assembler::new(&mesh);
-        let mut k = assembler.assemble::<LinearBMatrix>(&mesh, &material);
-        bc.apply(&mut k, &mut f);
+        let k = assembler.assemble::<LinearBMatrix>(&mesh, &material);
+        let bc_result: BoundaryConditionResult = bc.apply(&k, &f);
         let solver = DirectSolver{};
-        let result = solver.solve(&k, &f);
+        let result = solver.solve(&bc_result.k, &bc_result.f);
         assert!(result.is_ok());
+        let u_reduced = result.unwrap();
+        let u = bc_result.reconstruct(u_reduced);
+        assert_eq!(u.len(),3*8);
     }
 
     #[test]
@@ -73,8 +79,8 @@ mod integration_tests {
             let mesh = Mesh::generate(nx, ny, nz, dx, dy, dz);
             let material = LinearElastic { youngs_modulus: e, poisson_ratio: 0.3 };
 
-            let fixed_nodes: Vec<usize> = (0..ny).flat_map(|j| {
-                (0..nz).map(move |k| j * nx + k * nx * ny)
+            let fixed_nodes: Vec<FixedNode> = (0..ny).flat_map(|j| {
+                (0..nz).map(move |k|  FixedNode::all(j * nx + k * nx * ny) ,)
             }).collect();
             let bc = BoundaryConditions::new(fixed_nodes, Box::new(PenaltyMethod));
 
@@ -90,11 +96,10 @@ mod integration_tests {
             }
 
             let assembler = Assembler::new(&mesh);
-            let mut k = assembler.assemble::<LinearBMatrix>(&mesh, &material);
-            bc.apply(&mut k, &mut f);
-
-            let u = DirectSolver {}.solve(&k, &f).unwrap();
-
+            let k = assembler.assemble::<LinearBMatrix>(&mesh, &material);
+            let bc_result: BoundaryConditionResult = bc.apply(&k, &f);
+            let u_reduced = DirectSolver {}.solve(&bc_result.k, &bc_result.f).unwrap();
+            let u = bc_result.reconstruct(u_reduced);
             let max_disp = tip_nodes.iter()
                 .map(|&idx| u[3 * idx + 1].abs())
                 .fold(0.0f64, f64::max);
@@ -133,8 +138,8 @@ mod integration_tests {
         let material = LinearElastic { youngs_modulus: 1e6, poisson_ratio: 0.3 };
 
         // Fix all nodes on the x=0 face
-        let fixed_nodes: Vec<usize> = (0..ny).flat_map(|j| {
-            (0..nz).map(move |k| j * nx + k * nx * ny)
+        let fixed_nodes: Vec<FixedNode> = (0..ny).flat_map(|j| {
+            (0..nz).map(move |k| FixedNode::all(j * nx + k * nx * ny) )
         }).collect();
         let bc = BoundaryConditions::new(fixed_nodes, Box::new(PenaltyMethod));
 
@@ -152,11 +157,11 @@ mod integration_tests {
         }
 
         let assembler = Assembler::new(&mesh);
-        let mut k = assembler.assemble::<LinearBMatrix>(&mesh, &material);
-        bc.apply(&mut k, &mut f);
-
+        let k = assembler.assemble::<LinearBMatrix>(&mesh, &material);
+        let bc_result: BoundaryConditionResult = bc.apply(&k, &f);
         let solver = DirectSolver {};
-        let u = solver.solve(&k, &f).unwrap();
+        let u_reduced = solver.solve(&bc_result.k, &bc_result.f).unwrap();
+        let u = bc_result.reconstruct(u_reduced);
 
         // Mean x displacement on the tip face
         let mean_disp = tip_nodes.iter()

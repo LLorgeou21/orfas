@@ -3,7 +3,7 @@
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Status: Pre-Alpha](https://img.shields.io/badge/Status-Pre--Alpha-red.svg)]()
-[![Rust](https://img.shields.io/badge/Rust-2024%20Edition-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/Rust-2021%20Edition-orange.svg)](https://www.rust-lang.org/)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)]()
 
 > *A generic, extensible Finite Element Method framework written in Rust, with a primary focus on medical and biomechanical simulation.*
@@ -72,8 +72,8 @@ ORFAS is organized as a Cargo workspace with three crates:
 ```
 orfas/
 ├── orfas-core/     # Core library: mesh, materials, assembly, solvers
-├── orfas-io/       # Mesh I/O: .vtk, .obj file formats
-└── orfas-viewer/   # Interactive viewer for development and testing (egui)
+├── orfas-io/       # Mesh I/O: .vtk file format
+└── orfas-viewer/   # Interactive viewer (egui)
 ```
 
 ### Core abstractions (`orfas-core`)
@@ -84,31 +84,32 @@ The framework is built around three central traits:
 Any material model (linear elasticity, Neo-Hookean, Saint Venant-Kirchhoff, ...) implements
 this trait. Swapping material laws requires no changes to the assembly or solver.
 
-```rust
-pub trait MaterialLaw {
-    fn stress(&self, deformation_gradient: &Matrix3) -> Matrix3;
-    fn tangent_moduli(&self, deformation_gradient: &Matrix3) -> Tensor4;
-}
-```
+**`BoundaryConditionMethod`** — Defines how Dirichlet boundary conditions are applied to the system.
+Current implementations: penalty method and elimination method.
 
-**`Element`** — Defines how a finite element contributes to the global stiffness matrix.
-The first implementation targets linear tetrahedral elements (Tet4).
+**`Solver`** — Solves the assembled linear system `K·u = f`.
+Current implementation: direct LU decomposition via nalgebra.
 
-```rust
-pub trait Element {
-    fn stiffness_matrix(&self, nodes: &[Node], material: &dyn MaterialLaw) -> DMatrix;
-    fn shape_functions(&self, xi: &Point3) -> DVector;
-}
-```
+---
 
-**`Solver`** — Solves the assembled linear or nonlinear system.
-Static and dynamic solvers implement this trait independently.
+## Changelog
 
-```rust
-pub trait Solver {
-    fn solve(&self, system: &AssembledSystem) -> Result<DVec, SolverError>;
-}
-```
+### v0.2
+- Load external tetrahedral meshes from `.vtk` files (`orfas-io`)
+- Per-node force assignment via interactive viewer
+- Per-direction boundary conditions (`FixedNode` with x/y/z bools)
+- Elimination method for boundary conditions (reduces system size, more numerically stable than penalty)
+- Interactive node inspector: click a node to view its position, toggle fixed, set applied force
+- Fixed nodes and force-loaded nodes highlighted in the viewer
+
+### v0.1
+- Static 3D FEM solver for linear elastic materials
+- Linear tetrahedral elements (CST 3D) with constant strain-displacement matrix B
+- Structured mesh generation (`Mesh::generate`)
+- Penalty method for zero-displacement boundary conditions
+- Direct LU solver
+- Interactive egui viewer with 3D perspective projection, rotation, zoom
+- Deformed shape visualization with displacement colormap
 
 ---
 
@@ -116,8 +117,8 @@ pub trait Solver {
 
 | Version | Status | Description |
 |---------|--------|-------------|
-| **v0.1** | ✅ Validated | Static 3D FEM, linear elasticity, tetrahedral mesh, direct solver, basic egui viewer |
-| **v0.2** | ⬜ Planned | External mesh loading (`.vtk`, `.obj`), configurable boundary conditions |
+| **v0.1** | ✅ Done | Static 3D FEM, linear elasticity, tetrahedral mesh, direct solver, basic egui viewer |
+| **v0.2** | ✅ Done | VTK mesh loading, elimination boundary conditions, per-node forces, interactive node inspector |
 | **v0.3** | ⬜ Planned | Dynamic simulation, implicit Euler time integration |
 | **v0.4** | ⬜ Planned | Nonlinear material laws: Neo-Hookean, Saint Venant-Kirchhoff |
 | **v0.5** | ⬜ Planned | Python bindings via PyO3, numpy-compatible API |
@@ -147,10 +148,10 @@ cd orfas
 cargo build --release
 ```
 
-### Run the viewer (v0.1)
+### Run the viewer
 
 ```bash
-cargo run -p orfas-viewer -- --width 4 --height 4 --depth 4 --youngs-modulus 1e6 --poisson 0.45
+cargo run -p orfas-viewer
 ```
 
 ### Run the tests
@@ -179,8 +180,6 @@ curious about simulation — there is a place for you here.
 - **Validate results** — comparisons against SOFA or analytical solutions are invaluable
 
 ### Good first issues
-
-The following areas are good entry points for new contributors:
 
 - Additional boundary condition types
 - New element types (Tet10, Hex8)

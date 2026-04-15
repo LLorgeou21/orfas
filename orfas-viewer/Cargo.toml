@@ -7,4 +7,6 @@ edition = "2024"
 eframe = "0.34.1"
 egui = "0.34.1"
 orfas-core = { path = "../orfas-core" }
+orfas-io = { path = "../orfas-io" }
 nalgebra = "0.34.2"
+rfd = "0.17.2"
