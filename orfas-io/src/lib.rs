@@ -40,7 +40,7 @@ pub fn read_vtk(path : &str)->Result<Mesh,IoError>{
                         }
                         if coords.len()!=3{return Err(IoError::InvalidFormat);}
                         let position = Vector3::new(coords[0], coords[1], coords[2]);
-                        nodes.push(Node { position, fixed: false });
+                        nodes.push(Node { position, velocity : Vector3::zeros(), mass : 1. });
                     },
                     ParseState::Cells =>{
                         let mut indices_nodes = Vec::new();

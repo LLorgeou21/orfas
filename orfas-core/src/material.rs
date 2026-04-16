@@ -6,6 +6,7 @@ use nalgebra::Matrix6;
 /// It use a reference of the deformation to limit the copying
 pub trait MaterialLaw {
     fn stiffness_matrix(&self, deformation: Option<&Matrix6<f64>>) -> Matrix6<f64>;
+    fn density(&self)->f64;
 }
 
 
@@ -13,7 +14,8 @@ pub trait MaterialLaw {
 /// It define a youngs_modulus et poisson_ratio to calcul the stiffness
 pub struct LinearElastic {
     pub youngs_modulus : f64,
-    pub poisson_ratio : f64
+    pub poisson_ratio : f64,
+    pub density : f64
 }
 
 impl MaterialLaw for LinearElastic {
@@ -31,6 +33,10 @@ impl MaterialLaw for LinearElastic {
         )
     }
 
+    fn density(&self)->f64{
+        self.density
+    }
+
 
 }
 
@@ -42,7 +48,7 @@ mod tests {
 
     #[test]
     fn test_linear_elastic_stifness_matrix_calculation() {
-        let material: LinearElastic = LinearElastic { youngs_modulus: 1000.0, poisson_ratio: 0.3 };
+        let material: LinearElastic = LinearElastic { youngs_modulus: 1000.0, poisson_ratio: 0.3, density : 1000. };
         let stiffness = material.stiffness_matrix(None);
         assert!((stiffness[(0,0)] - 1346.1538).abs() < 1e-3);
     }

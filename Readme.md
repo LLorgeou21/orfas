@@ -9,6 +9,8 @@
 > *A generic, extensible Finite Element Method framework written in Rust, with a primary focus on medical and biomechanical simulation.*
 
 ---
+![ORFAS dynamic simulation](simulation.gif)
+---
 
 ## Abstract
 
@@ -23,9 +25,9 @@ types are interchangeable via traits), **extensibility** (each component can be 
 without modifying the core), and **performance** (Rust's ownership model and zero-cost abstractions
 enable safe, high-performance numerical computation without a garbage collector).
 
-This project is in active early development. The current milestone targets a static 3D FEM solver
-with linear elasticity on tetrahedral meshes. Contributions, feedback, and collaborations are
-warmly welcomed.
+This project is in active early development. The current milestone targets a dynamic 3D FEM solver
+with linear elasticity on tetrahedral meshes and implicit Euler time integration. Contributions,
+feedback, and collaborations are warmly welcomed.
 
 ---
 
@@ -71,14 +73,14 @@ ORFAS is organized as a Cargo workspace with three crates:
 
 ```
 orfas/
-├── orfas-core/     # Core library: mesh, materials, assembly, solvers
+├── orfas-core/     # Core library: mesh, materials, assembly, solvers, integrators
 ├── orfas-io/       # Mesh I/O: .vtk file format
 └── orfas-viewer/   # Interactive viewer (egui)
 ```
 
 ### Core abstractions (`orfas-core`)
 
-The framework is built around three central traits:
+The framework is built around several central traits:
 
 **`MaterialLaw`** — Defines the constitutive relationship between strain and stress.
 Any material model (linear elasticity, Neo-Hookean, Saint Venant-Kirchhoff, ...) implements
@@ -90,9 +92,31 @@ Current implementations: penalty method and elimination method.
 **`Solver`** — Solves the assembled linear system `K·u = f`.
 Current implementation: direct LU decomposition via nalgebra.
 
+**`DampingModel`** — Defines how the damping matrix `C` is computed from the mass and stiffness matrices.
+Current implementation: Rayleigh damping `C = α·M + β·K`.
+
+**`IntegratorMethod`** — Defines a time integration scheme advancing the `MechanicalState` by one step `dt`.
+Current implementation: implicit Euler integration.
+
+**`MechanicalState`** — Holds the dynamic state of the simulated object: position, velocity, and acceleration vectors.
+Exposes vector operations (`v_op`, `add_mv`) inspired by SOFA's `MechanicalState` abstraction.
+
 ---
 
 ## Changelog
+
+### v0.3
+- Dynamic simulation via implicit Euler time integration
+- Lumped mass matrix assembly (`assemble_mass` on `Assembler`)
+- Rayleigh damping (`DampingModel` trait, `RayleighDamping` implementation)
+- `MechanicalState` struct with position, velocity, acceleration and vector operations
+- `IntegratorMethod` trait and `ImplicitEulerIntegrator` implementation
+- Refactored boundary conditions: `Constraint` and `Load` as independent scene components (removed `fixed` from `Node`)
+- Real-time dynamic simulation in the viewer: Initialize / Play / Pause / Reset
+- Static and dynamic simulation modes selectable in the UI
+- Scrollable left panel in the viewer
+- `density` added to `MaterialLaw` trait and `LinearElastic`
+- Rayleigh coefficients α, β and time step `dt` exposed in the UI
 
 ### v0.2
 - Load external tetrahedral meshes from `.vtk` files (`orfas-io`)
@@ -119,7 +143,7 @@ Current implementation: direct LU decomposition via nalgebra.
 |---------|--------|-------------|
 | **v0.1** | ✅ Done | Static 3D FEM, linear elasticity, tetrahedral mesh, direct solver, basic egui viewer |
 | **v0.2** | ✅ Done | VTK mesh loading, elimination boundary conditions, per-node forces, interactive node inspector |
-| **v0.3** | ⬜ Planned | Dynamic simulation, implicit Euler time integration |
+| **v0.3** | ✅ Done | Dynamic simulation, implicit Euler time integration, Rayleigh damping, MechanicalState |
 | **v0.4** | ⬜ Planned | Nonlinear material laws: Neo-Hookean, Saint Venant-Kirchhoff |
 | **v0.5** | ⬜ Planned | Python bindings via PyO3, numpy-compatible API |
 | **v0.6** | ⬜ Planned | Mesh/mesh contact and collision detection |

@@ -3,11 +3,12 @@ use nalgebra::Vector3;
 
 
 /// A node in the FEM mesh.
-/// Stores the 3D position in world space and whether
-/// the node is fixed (zero displacement boundary condition).
+/// Stores the 3D position in world space the velocity
+/// and the mass
 pub struct Node {
     pub position  : Vector3<f64>,
-    pub fixed : bool
+    pub velocity  : Vector3<f64>,
+    pub mass      : f64
 }
 
 /// A tetrahedral element in the FEM mesh.
@@ -39,7 +40,7 @@ impl Mesh {
             for j in 0..ny {
                 for i in 0..nx {
                     let position = Vector3::new(i as f64 * dx, j as f64 * dy, k as f64 * dz);
-                    nodes.push(Node { position, fixed: false });
+                    nodes.push(Node { position, velocity : Vector3::zeros(), mass : 1. });
                 }
             }
         }

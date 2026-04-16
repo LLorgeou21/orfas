@@ -1,10 +1,11 @@
-use nalgebra::{DMatrix, DVector};
+use nalgebra::{DMatrix, DVector, Vector3};
 use std::collections::HashMap;
 
 // ─── Data structures ──────────────────────────────────────────────────────────
 
 /// Stores a fixed node index and which displacement directions are constrained.
 /// Use the constructors (all, only_x, only_y, only_z) for convenience.
+#[derive(Clone)]
 pub struct FixedNode {
     pub indice: usize,
     pub x: bool,
@@ -72,20 +73,40 @@ impl BoundaryConditionResult {
 
 /// Holds the fixed nodes and the chosen boundary condition method.
 pub struct BoundaryConditions {
-    pub fixed_nodes: Vec<FixedNode>,
+    pub constraint: Constraint,
+    pub loads: Vec<Load>,
     pub method: Box<dyn BoundaryConditionMethod>,
 }
 
 impl BoundaryConditions {
-
-    pub fn new(fixed_nodes: Vec<FixedNode>, method: Box<dyn BoundaryConditionMethod>) -> Self {
-        BoundaryConditions { fixed_nodes, method }
+    pub fn new(constraint: Constraint, loads: Vec<Load>, method: Box<dyn BoundaryConditionMethod>) -> Self {
+        BoundaryConditions { constraint, loads, method }
     }
 
-    pub fn apply(&self, k: &DMatrix<f64>, f: &DVector<f64>) -> BoundaryConditionResult {
-        self.method.apply(k, f, &self.fixed_nodes)
+    pub fn apply(&self, k: &DMatrix<f64>, n_nodes: usize) -> BoundaryConditionResult {
+        let mut f = DVector::zeros(3 * n_nodes);
+        for load in &self.loads {
+            for &idx in &load.list {
+                f[3 * idx]     += load.force.x;
+                f[3 * idx + 1] += load.force.y;
+                f[3 * idx + 2] += load.force.z;
+            }
+        }
+        self.method.apply(k, &f, &self.constraint)
     }
 }
+
+#[derive(Clone)]
+pub struct Constraint {
+    pub list : Vec<FixedNode>
+}
+
+#[derive(Clone)]
+pub struct Load {
+    pub list : Vec<usize>,
+    pub force : Vector3<f64>
+}
+
 
 // ─── Trait ────────────────────────────────────────────────────────────────────
 
@@ -93,7 +114,7 @@ impl BoundaryConditions {
 /// Returns a BoundaryConditionResult containing the modified system
 /// and the information needed to reconstruct the full displacement vector.
 pub trait BoundaryConditionMethod {
-    fn apply(&self, k: &DMatrix<f64>, f: &DVector<f64>, fixed_nodes: &[FixedNode]) -> BoundaryConditionResult;
+    fn apply(&self, k: &DMatrix<f64>, f: &DVector<f64>, constraint: &Constraint) -> BoundaryConditionResult;
 }
 
 // ─── Implementations ──────────────────────────────────────────────────────────
@@ -105,10 +126,10 @@ pub trait BoundaryConditionMethod {
 pub struct PenaltyMethod;
 
 impl BoundaryConditionMethod for PenaltyMethod {
-    fn apply(&self, k: &DMatrix<f64>, f: &DVector<f64>, fixed_nodes: &[FixedNode]) -> BoundaryConditionResult {
+    fn apply(&self, k: &DMatrix<f64>, f: &DVector<f64>, fixed_nodes: &Constraint) -> BoundaryConditionResult {
         let mut new_k = k.clone();
         let mut new_f = f.clone();
-        for node in fixed_nodes {
+        for node in &fixed_nodes.list {
             let i = 3 * node.indice;
             if node.x { new_k[(i,   i  )] = 1e30; new_f[i  ] = 0.0; }
             if node.y { new_k[(i+1, i+1)] = 1e30; new_f[i+1] = 0.0; }
@@ -124,10 +145,10 @@ impl BoundaryConditionMethod for PenaltyMethod {
 pub struct EliminationMethod;
 
 impl BoundaryConditionMethod for EliminationMethod {
-    fn apply(&self, k: &DMatrix<f64>, f: &DVector<f64>, fixed_nodes: &[FixedNode]) -> BoundaryConditionResult {
+    fn apply(&self, k: &DMatrix<f64>, f: &DVector<f64>, fixed_nodes: &Constraint) -> BoundaryConditionResult {
         // Build a map from node index to blocked directions for O(1) lookup
         let mut blocked: HashMap<usize, (bool, bool, bool)> = HashMap::new();
-        for node in fixed_nodes {
+        for node in &fixed_nodes.list {
             blocked.insert(node.indice, (node.x, node.y, node.z));
         }
 

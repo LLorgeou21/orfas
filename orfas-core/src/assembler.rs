@@ -1,4 +1,4 @@
-use nalgebra::{DMatrix, Matrix3, Matrix6, SMatrix, Vector3};
+use nalgebra::{DMatrix, Matrix3, Matrix6, SMatrix, Vector3,DVector};
 use crate::material::MaterialLaw;
 use crate::mesh::Mesh;
 type Matrix6x12 = SMatrix<f64, 6, 12>;
@@ -125,6 +125,27 @@ impl Assembler {
         }
         k
         }
+
+    pub fn assemble_mass(&self, mesh: &Mesh, material: &dyn MaterialLaw) -> DVector<f64> {
+        let n_nodes = mesh.nodes.len();
+        let mut mat_mass = DVector::zeros(3 * n_nodes);
+        for (i, _) in mesh.elements.iter().enumerate() {
+            let [a, b, c, d] = self.connectivity[i];
+            let volume = tetra_volume(
+                &mesh.nodes[a].position,
+                &mesh.nodes[b].position,
+                &mesh.nodes[c].position,
+                &mesh.nodes[d].position,
+            );
+            let mass = material.density() * volume;
+            for id in [a, b, c, d] {
+                for j in 0..3 {
+                    mat_mass[3 * id + j] += mass / 4.0;
+                }
+            }
+        }
+        mat_mass
+    }
         
 
 }

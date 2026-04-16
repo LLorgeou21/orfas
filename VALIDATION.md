@@ -4,9 +4,9 @@
 
 ## v0.1 — Static FEM core
 
-**Element type:** Linear tetrahedron (CST 3D)  
-**Material law:** Linear elastic (isotropic)  
-**Boundary conditions:** Penalty method  
+**Element type:** Linear tetrahedron (CST 3D)
+**Material law:** Linear elastic (isotropic)
+**Boundary conditions:** Penalty method
 **Solver:** LU decomposition (nalgebra)
 
 ### Method
@@ -78,25 +78,6 @@ The error decreases monotonically. The residual ~20% error at the finest mesh is
 
 No numerical benchmark was run for v0.2 as the core FEM pipeline was not modified. Validation focused on correctness of the new components via unit tests.
 
-**`read_vtk` tests (orfas-io):**
-
-| Test | Description | Status |
-|---|---|---|
-| `test_read_vtk_valid` | Load reference cube mesh, check 8 nodes and 6 tetrahedra | PASS |
-| `test_read_vtk_node_positions` | Verify node 0 at origin and node 7 at (1,1,1) | PASS |
-| `test_read_vtk_file_not_found` | Non-existent file returns `IoError::UnreadableFile` | PASS |
-| `test_read_vtk_invalid_format` | File not starting with `# vtk` returns `IoError::InvalidFormat` | PASS |
-
-The elimination method was verified indirectly — all v0.1 numerical tests pass with both penalty and elimination, confirming that the system reduction and reconstruction produce equivalent results.
-
-
-
----
-
-## v0.2 — I/O and boundary conditions
-
-No numerical benchmark was run for v0.2 as the core FEM pipeline was not modified. Validation focused on correctness of the new components via unit tests.
-
 ### VTK mesh loading (`orfas-io`)
 
 | Test | Description | Status |
@@ -109,3 +90,72 @@ No numerical benchmark was run for v0.2 as the core FEM pipeline was not modifie
 ### Elimination method
 
 The elimination method was verified indirectly — all v0.1 numerical tests pass with both penalty and elimination, confirming that the system reduction and reconstruction produce equivalent results.
+
+---
+
+## v0.3 — Dynamic simulation
+
+**Integrator:** Implicit Euler
+**Damping:** Rayleigh (`C = α·M + β·K`)
+**Mass:** Lumped (concentrated) — each node receives 1/4 of the mass of each connected element
+
+### Method
+
+ORFAS solves the dynamic linear elasticity problem `M·a + C·v + K·u = f` using implicit Euler time integration.
+
+**Mass assembly:** The lumped mass matrix is assembled by distributing each element's mass (`ρ·V`) equally across its 4 nodes. The result is stored as a `DVector` (diagonal only) rather than a full matrix, avoiding unnecessary memory usage and enabling efficient `M·v` products via component-wise multiplication.
+
+**Rayleigh damping:** The damping matrix is computed as `C = α·M + β·K`, where `α` and `β` are user-defined coefficients. `α` controls mass-proportional damping (low-frequency), `β` controls stiffness-proportional damping (high-frequency).
+
+**Implicit Euler integration:** At each time step `dt`, the following velocity-based system is solved:
+
+```
+(M/dt + C + dt·K) · v_next = M·v/dt + f - K·u
+```
+
+Then the position is updated: `u_next = u + dt·v_next`. This formulation is unconditionally stable — large time steps do not cause divergence, unlike explicit methods.
+
+**MechanicalState:** The dynamic state (position, velocity, acceleration) is encapsulated in a `MechanicalState` struct. Vector operations (`v_op`, `add_mv`) are exposed as methods, inspired by SOFA's `MechanicalState` abstraction.
+
+### Test case 1 — Mass assembly
+
+A unit cube mesh (`2×2×2`, volume = 1) with density `ρ = 1500 kg/m³`. The total assembled mass must satisfy `sum(mass) / 3 = ρ · V`.
+
+| Quantity | Value |
+|---|---|
+| Expected total mass | 1500.0 |
+| Computed total mass | 1500.0 |
+| Relative error | 0.0000% |
+
+### Test case 2 — Rayleigh damping symmetry
+
+The damping matrix `C = α·M + β·K` must be symmetric since both `M` (diagonal) and `K` (symmetric by construction) are symmetric. Verified on a `3×3×3` mesh with `α = 0.1`, `β = 0.01`.
+
+| Quantity | Value |
+|---|---|
+| Max asymmetry | < 1×10⁻¹⁰ |
+| Status | PASS |
+
+### Test case 3 — Dynamic convergence to static solution
+
+A bar under axial traction (`nx=5, ny=nz=2`, `L=4`, `A=1`, `F=100`, `E=1×10⁶`) is simulated dynamically with heavy Rayleigh damping (`α=10`, `β=0.01`) using implicit Euler with `dt=1.0` for 500 steps. With sufficient damping, the dynamic solution must converge to the static equilibrium.
+
+The test compares the dynamic solution to both the static FEM solution and the analytical solution to isolate integrator behavior from mesh discretization error. The elimination method is used to avoid ill-conditioning from the penalty method.
+
+| Quantity | Value |
+|---|---|
+| Static FEM displacement | 3.9282×10⁻⁴ |
+| Dynamic displacement (500 steps) | 3.9282×10⁻⁴ |
+| Analytical displacement | 4.0000×10⁻⁴ |
+| Error vs static | 0.0000% |
+| Error vs analytical | 1.79% |
+
+The 1.79% error vs analytical is attributable to mesh discretization (same error as the static solver on this mesh), confirming that the integrator introduces no additional error at convergence.
+
+### Summary
+
+| Test | Description | Status |
+|---|---|---|
+| `test_mass_assembly` | Total mass matches `density * volume` | PASS |
+| `test_rayleigh_damping_symmetry` | Damping matrix is symmetric | PASS |
+| `test_implicit_euler_static_convergence` | Dynamic solution converges to static (error 0.0000%) | PASS |
