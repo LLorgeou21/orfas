@@ -159,3 +159,113 @@ The 1.79% error vs analytical is attributable to mesh discretization (same error
 | `test_mass_assembly` | Total mass matches `density * volume` | PASS |
 | `test_rayleigh_damping_symmetry` | Damping matrix is symmetric | PASS |
 | `test_implicit_euler_static_convergence` | Dynamic solution converges to static (error 0.0000%) | PASS |
+
+---
+
+## v0.4 — Nonlinear materials and Newton-Raphson
+
+**Material law:** Saint Venant-Kirchhoff (SVK) hyperelastic
+**Static solver:** Newton-Raphson nonlinear solver
+**Dynamic integrator:** Implicit Euler with internal Newton-Raphson loop
+**Formulation:** Lagrangian, 2nd Piola-Kirchhoff stress (PK2), deformation gradient F
+
+### Method
+
+v0.4 extends ORFAS from linear to nonlinear elasticity. The core change is the introduction of a
+Lagrangian hyperelastic formulation: the material law is now expressed in terms of the deformation
+gradient `F = I + Σ uᵢ ⊗ ∇Nᵢ`, and internal forces are computed as `f_int_i = V · Pᵀ · ∇Nᵢ`
+where `P = F · S` (1st Piola-Kirchhoff, from PK2 via `S = pk2_stress(F)`).
+
+**Saint Venant-Kirchhoff:** SVK extends linear elasticity to large deformations by applying the same
+Hooke law to the Green-Lagrange strain tensor `E = ½(FᵀF - I)` instead of the small strain tensor:
+`S = λ·tr(E)·I + 2μ·E`. The tangent stiffness `C = dS/dE = λ(I⊗I) + 2μ·I⁽⁴⁾` is constant,
+identical to the linear elastic constitutive matrix. SVK reduces exactly to linear elasticity when
+`F → I`. It is not suitable for large compressive deformations but is the natural entry point for
+nonlinear FEM.
+
+**Newton-Raphson:** The nonlinear static problem `R(u) = f_int(u) - f_ext = 0` is solved by
+Newton-Raphson iteration. At each step: assemble `K_tangent(u)` and `f_int(u)` on the full mesh,
+restrict to free DOFs, solve `K_tangent · Δu = -R`, update `u ← u + Δu`. Convergence is checked
+on two normalized criteria (SOFA convention): `‖R‖ / ‖f_ext‖ < tol` and `‖Δu‖ / ‖u‖ < tol`.
+
+**Nonlinear implicit Euler:** The dynamic equation `M·a + C·v + f_int(u) = f_ext` is integrated
+with implicit Euler, leading to the nonlinear residual `R(v_next) = M(v_next−v)/dt + C·v_next + f_int(u + dt·v_next) − f_ext = 0`.
+Newton-Raphson solves this at each time step with system matrix `A = M/dt + C + dt·K_tangent(u_next)`.
+The factor `dt` before `K_tangent` arises from the chain rule: `∂f_int(u_next)/∂v_next = K_tangent · dt`.
+
+**Geometry cache:** Element volumes and shape function gradients `(b, c, d)` are computed once at
+`Assembler::new` and reused at every assembly call. This mirrors the `TetrahedronSetGeometryAlgorithms`
+pattern in SOFA.
+
+### Test case 1 — Internal forces zero at rest
+
+With `u = 0`, `F = I`, `E = 0`, so `S = 0` and `P = F·S = 0`. Internal forces must vanish exactly.
+
+| Quantity | Value |
+|---|---|
+| `‖f_int(u=0)‖` | < 1×10⁻¹⁰ |
+| Status | PASS |
+
+### Test case 2 — Tangent stiffness at identity
+
+With `F = I`, `tangent_stiffness(I)` must equal the former linear elastic constitutive matrix `C`.
+Verified on `C[0,0] = λ + 2μ = E(1−ν)/((1+ν)(1−2ν))`.
+
+| Quantity | Value |
+|---|---|
+| Expected `C[0,0]` | 1346.154 |
+| Computed `C[0,0]` | 1346.154 |
+| Absolute error | < 1×10⁻³ |
+| Status | PASS |
+
+### Test case 3 — SVK converges to linear for small deformations
+
+For `‖∇u‖ → 0`, SVK and linear elasticity must give identical stress. Verified with a small
+displacement gradient (`scale = 1e-4`): relative error between SVK `pk2_stress` and linear
+`C:ε` is below `1×10⁻³`.
+
+| Quantity | Value |
+|---|---|
+| Relative error `‖S_svk − C:ε‖ / ‖C:ε‖` | < 1×10⁻³ |
+| Status | PASS |
+
+### Test case 4 — Newton-Raphson convergence and residual
+
+A bar under axial traction (`nx=3, ny=nz=2`, `F=1`, `E=1×10⁶`) solved with Newton-Raphson.
+The normalized residual at convergence must satisfy `‖R‖ / ‖f_ext‖ < 1×10⁻⁶`.
+
+| Quantity | Value |
+|---|---|
+| Normalized residual at convergence | 9.77×10⁻¹¹ |
+| Tolerance | 1×10⁻⁶ |
+| Status | PASS |
+
+### Test case 5 — Nonlinear dynamic convergence to static solution
+
+Same benchmark as v0.3 test case 3, now using SVK material and the nonlinear implicit Euler
+integrator. With heavy Rayleigh damping (`α=10`, `β=0.01`) and `dt=1.0` for 500 steps, the
+dynamic solution must converge to the nonlinear static equilibrium.
+
+| Quantity | Value |
+|---|---|
+| Static SVK displacement | 3.9282×10⁻⁴ |
+| Dynamic displacement (500 steps) | 3.9282×10⁻⁴ |
+| Analytical displacement | 4.0000×10⁻⁴ |
+| Error vs static | 0.0000% |
+| Error vs analytical | 1.79% |
+
+The error vs analytical is unchanged from v0.3 — the nonlinear integrator introduces no additional
+error at convergence, and the 1.79% gap remains attributable to mesh discretization.
+
+### Summary
+
+| Test | Description | Status |
+|---|---|---|
+| `test_internal_forces_zero_at_rest` | `f_int(u=0) = 0` exactly | PASS |
+| `test_tangent_stiffness_at_identity` | `C(F=I)` matches linear elastic C | PASS |
+| `test_svk_converges_to_linear_for_small_deformations` | SVK → linear as `‖∇u‖ → 0` | PASS |
+| `test_newton_converges_for_svk` | Newton-Raphson converges for SVK material | PASS |
+| `test_newton_satisfies_residual` | Normalized residual at convergence < 1×10⁻⁶ | PASS |
+| `test_implicit_euler_static_convergence` | Nonlinear dynamic converges to static (0.0000%) | PASS |
+| `test_axial_traction` | Traction error 0.56% (unchanged from v0.1) | PASS |
+| `test_beam_bending_convergence` | Monotone convergence, shear locking ~20% (unchanged) | PASS |

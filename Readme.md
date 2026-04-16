@@ -26,8 +26,8 @@ without modifying the core), and **performance** (Rust's ownership model and zer
 enable safe, high-performance numerical computation without a garbage collector).
 
 This project is in active early development. The current milestone targets a dynamic 3D FEM solver
-with linear elasticity on tetrahedral meshes and implicit Euler time integration. Contributions,
-feedback, and collaborations are warmly welcomed.
+with nonlinear hyperelastic materials on tetrahedral meshes and implicit Euler time integration with
+Newton-Raphson. Contributions, feedback, and collaborations are warmly welcomed.
 
 ---
 
@@ -82,9 +82,10 @@ orfas/
 
 The framework is built around several central traits:
 
-**`MaterialLaw`** — Defines the constitutive relationship between strain and stress.
-Any material model (linear elasticity, Neo-Hookean, Saint Venant-Kirchhoff, ...) implements
-this trait. Swapping material laws requires no changes to the assembly or solver.
+**`MaterialLaw`** — Defines the constitutive relationship between strain and stress in the Lagrangian
+frame. Any hyperelastic material model (Saint Venant-Kirchhoff, Neo-Hookean, ...) implements this
+trait via three methods: `pk2_stress(F)`, `tangent_stiffness(F)`, and `strain_energy(F)`. Swapping
+material laws requires no changes to the assembly or solver.
 
 **`BoundaryConditionMethod`** — Defines how Dirichlet boundary conditions are applied to the system.
 Current implementations: penalty method and elimination method.
@@ -92,11 +93,14 @@ Current implementations: penalty method and elimination method.
 **`Solver`** — Solves the assembled linear system `K·u = f`.
 Current implementation: direct LU decomposition via nalgebra.
 
+**`NonlinearSolver`** — Solves the nonlinear static problem `R(u) = f_int(u) - f_ext = 0`.
+Current implementation: Newton-Raphson with normalized convergence criteria.
+
 **`DampingModel`** — Defines how the damping matrix `C` is computed from the mass and stiffness matrices.
 Current implementation: Rayleigh damping `C = α·M + β·K`.
 
 **`IntegratorMethod`** — Defines a time integration scheme advancing the `MechanicalState` by one step `dt`.
-Current implementation: implicit Euler integration.
+Current implementation: implicit Euler with internal Newton-Raphson loop, supporting nonlinear materials.
 
 **`MechanicalState`** — Holds the dynamic state of the simulated object: position, velocity, and acceleration vectors.
 Exposes vector operations (`v_op`, `add_mv`) inspired by SOFA's `MechanicalState` abstraction.
@@ -104,6 +108,16 @@ Exposes vector operations (`v_op`, `add_mv`) inspired by SOFA's `MechanicalState
 ---
 
 ## Changelog
+
+### v0.4
+- Nonlinear hyperelastic material: `SaintVenantKirchhoff` — replaces `LinearElastic`, reduces to linear elasticity for small deformations
+- Fully refactored `MaterialLaw` trait: `pk2_stress(F)`, `tangent_stiffness(F)`, `strain_energy(F)` — all taking the deformation gradient `F` as input
+- `NonlinearSolver` trait and `NewtonRaphson` implementation with SOFA-style normalized convergence criteria
+- `assemble_tangent` and `assemble_internal_forces` on `Assembler` — geometry cached at init, forces computed from `F = I + Σ uᵢ ⊗ ∇Nᵢ`
+- `ImplicitEulerIntegrator` extended with internal Newton-Raphson loop — nonlinear dynamic simulation
+- `BoundaryConditionResult::reconstruct_ref` — non-consuming reconstruction for use inside iterative loops
+- `restrict_matrix` / `restrict_vector` — shared helpers for free-DOF extraction, used by both solver and integrator
+- Viewer updated: `SaintVenantKirchhoff` material, `Newton-Raphson` solver selectable in UI
 
 ### v0.3
 - Dynamic simulation via implicit Euler time integration
@@ -144,13 +158,14 @@ Exposes vector operations (`v_op`, `add_mv`) inspired by SOFA's `MechanicalState
 | **v0.1** | ✅ Done | Static 3D FEM, linear elasticity, tetrahedral mesh, direct solver, basic egui viewer |
 | **v0.2** | ✅ Done | VTK mesh loading, elimination boundary conditions, per-node forces, interactive node inspector |
 | **v0.3** | ✅ Done | Dynamic simulation, implicit Euler time integration, Rayleigh damping, MechanicalState |
-| **v0.4** | ⬜ Planned | Nonlinear material laws: Neo-Hookean, Saint Venant-Kirchhoff |
-| **v0.5** | ⬜ Planned | Python bindings via PyO3, numpy-compatible API |
-| **v0.6** | ⬜ Planned | Mesh/mesh contact and collision detection |
-| **v0.7** | ⬜ Planned | Tool/mesh contact for surgical interaction |
-| **v0.8** | ⬜ Planned | Sparse solvers, parallelism, performance optimization |
-| **v0.9** | ⬜ Planned | Real-time simulation with hard timing constraints |
-| **v0.10** | ⬜ Planned | Haptic feedback interface |
+| **v0.4** | ✅ Done | Nonlinear materials (SVK), Newton-Raphson solver, nonlinear implicit Euler, refactored MaterialLaw |
+| **v0.5** | ⬜ Planned | Neo-Hookean material law |
+| **v0.6** | ⬜ Planned | Python bindings via PyO3, numpy-compatible API |
+| **v0.7** | ⬜ Planned | Mesh/mesh contact and collision detection |
+| **v0.8** | ⬜ Planned | Tool/mesh contact for surgical interaction |
+| **v0.9** | ⬜ Planned | Sparse solvers, parallelism, performance optimization |
+| **v0.10** | ⬜ Planned | Real-time simulation with hard timing constraints |
+| **v0.11** | ⬜ Planned | Haptic feedback interface |
 | **v1.0** | ⬜ Planned | C/C++ FFI bindings — integration as a SOFA plugin |
 
 ---
@@ -205,6 +220,7 @@ curious about simulation — there is a place for you here.
 
 ### Good first issues
 
+- Neo-Hookean material law (v0.5)
 - Additional boundary condition types
 - New element types (Tet10, Hex8)
 - Export to `.vtu` for ParaView visualization
