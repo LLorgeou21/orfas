@@ -78,6 +78,19 @@ orfas/
 └── orfas-viewer/   # Interactive viewer (egui)
 ```
 
+### orfas-viewer structure
+
+The viewer is organized as a set of focused modules:
+
+```
+orfas-viewer/src/
+├── main.rs        # Entry point only
+├── app.rs         # MyEguiApp, impl eframe::App, all UI logic
+├── state.rs       # AppState, Camera, enums, make_material
+├── simulation.rs  # build_simulation, run_simulation_static, init_simulation_dynamic
+└── render.rs      # project, screen_to_node, depth_sorted_nodes
+```
+
 ### Core abstractions (`orfas-core`)
 
 The framework is built around several central traits:
@@ -94,7 +107,8 @@ Current implementations: penalty method and elimination method.
 Current implementation: direct LU decomposition via nalgebra.
 
 **`NonlinearSolver`** — Solves the nonlinear static problem `R(u) = f_int(u) - f_ext = 0`.
-Current implementation: Newton-Raphson with normalized convergence criteria.
+Current implementations: `NewtonRaphson` (reassembles K at each iteration) and
+`NewtonRaphsonCachedK` (factorizes K once, for materials with constant tangent stiffness such as SVK).
 
 **`DampingModel`** — Defines how the damping matrix `C` is computed from the mass and stiffness matrices.
 Current implementation: Rayleigh damping `C = α·M + β·K`.
@@ -108,6 +122,19 @@ Exposes vector operations (`v_op`, `add_mv`) inspired by SOFA's `MechanicalState
 ---
 
 ## Changelog
+
+### v0.5
+- **Neo-Hookean hyperelastic material** (`NeoHookean`) — compressible formulation:
+  `W = μ/2·(I₁−3) − μ·ln(J) + λ/2·(ln J)²`, with `S = μ(I − C⁻¹) + λ·ln(J)·C⁻¹`
+  and full analytical tangent stiffness `C_tangent = dS/dE` depending on `F` — requires K reassembly at each Newton iteration
+- **`NewtonRaphsonCachedK`** — Newton-Raphson variant that factorizes `K_tangent` once at `u=0`
+  and reuses the LU factorization across all Newton iterations; valid for SVK where `C_tangent` is constant;
+  reduces cost from `N×O(n³)` to `O(n³) + N×O(n²)` for `N` Newton iterations
+- **Viewer refactored** into 5 focused modules (`app.rs`, `state.rs`, `simulation.rs`, `render.rs`, `main.rs`)
+- **Improved camera** — orbit with explicit target point, Shift+drag pan, multiplicative scroll zoom,
+  pitch clamp to avoid gimbal flip, auto-focus on mesh bounding box at load/simulate,
+  proper view matrix via `right/up/forward` vectors, depth-sorted node rendering (painter's algorithm)
+- Neo-Hookean and Newton (cached K) selectable in the viewer UI
 
 ### v0.4
 - Nonlinear hyperelastic material: `SaintVenantKirchhoff` — replaces `LinearElastic`, reduces to linear elasticity for small deformations
@@ -159,7 +186,7 @@ Exposes vector operations (`v_op`, `add_mv`) inspired by SOFA's `MechanicalState
 | **v0.2** | ✅ Done | VTK mesh loading, elimination boundary conditions, per-node forces, interactive node inspector |
 | **v0.3** | ✅ Done | Dynamic simulation, implicit Euler time integration, Rayleigh damping, MechanicalState |
 | **v0.4** | ✅ Done | Nonlinear materials (SVK), Newton-Raphson solver, nonlinear implicit Euler, refactored MaterialLaw |
-| **v0.5** | ⬜ Planned | Neo-Hookean material law |
+| **v0.5** | ✅ Done | Neo-Hookean material, NewtonRaphsonCachedK, viewer refactor, improved camera |
 | **v0.6** | ⬜ Planned | Python bindings via PyO3, numpy-compatible API |
 | **v0.7** | ⬜ Planned | Mesh/mesh contact and collision detection |
 | **v0.8** | ⬜ Planned | Tool/mesh contact for surgical interaction |
@@ -220,7 +247,6 @@ curious about simulation — there is a place for you here.
 
 ### Good first issues
 
-- Neo-Hookean material law (v0.5)
 - Additional boundary condition types
 - New element types (Tet10, Hex8)
 - Export to `.vtu` for ParaView visualization

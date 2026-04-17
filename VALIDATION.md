@@ -140,8 +140,6 @@ The damping matrix `C = α·M + β·K` must be symmetric since both `M` (diagona
 
 A bar under axial traction (`nx=5, ny=nz=2`, `L=4`, `A=1`, `F=100`, `E=1×10⁶`) is simulated dynamically with heavy Rayleigh damping (`α=10`, `β=0.01`) using implicit Euler with `dt=1.0` for 500 steps. With sufficient damping, the dynamic solution must converge to the static equilibrium.
 
-The test compares the dynamic solution to both the static FEM solution and the analytical solution to isolate integrator behavior from mesh discretization error. The elimination method is used to avoid ill-conditioning from the penalty method.
-
 | Quantity | Value |
 |---|---|
 | Static FEM displacement | 3.9282×10⁻⁴ |
@@ -269,3 +267,147 @@ error at convergence, and the 1.79% gap remains attributable to mesh discretizat
 | `test_implicit_euler_static_convergence` | Nonlinear dynamic converges to static (0.0000%) | PASS |
 | `test_axial_traction` | Traction error 0.56% (unchanged from v0.1) | PASS |
 | `test_beam_bending_convergence` | Monotone convergence, shear locking ~20% (unchanged) | PASS |
+
+---
+
+## v0.5 — Neo-Hookean material and NewtonRaphsonCachedK
+
+**Material law:** Neo-Hookean (compressible)
+**Static solver:** `NewtonRaphsonCachedK` (new), `NewtonRaphson` (unchanged)
+**Formulation:** Lagrangian, PK2 stress, deformation gradient F
+
+### Method
+
+#### Neo-Hookean material
+
+The compressible Neo-Hookean model is the first material in ORFAS where `C_tangent = dS/dE` depends
+on `F`, requiring K to be reassembled at each Newton iteration. Its strain energy density is:
+
+```
+W = μ/2·(I₁ − 3) − μ·ln(J) + λ/2·(ln J)²
+```
+
+where `I₁ = tr(C) = tr(FᵀF)` and `J = det(F)`. The 2nd Piola-Kirchhoff stress is:
+
+```
+S = μ·(I − C⁻¹) + λ·ln(J)·C⁻¹
+```
+
+The material tangent stiffness `C_tangent = dS/dE` is derived analytically via `d/dE = 2·d/dC`:
+
+```
+C_ijkl = λ·C⁻¹_ij·C⁻¹_kl + (μ − λ·ln J)·(C⁻¹_ik·C⁻¹_jl + C⁻¹_il·C⁻¹_jk)
+```
+
+This reduces to the Hooke matrix at `F = I` (where `C⁻¹ = I`, `ln J = 0`, coefficient `= μ`),
+ensuring continuity with SVK and linear elasticity for small deformations. For large compressions
+(`J → 0`), the `−μ·ln(J)` term provides a volumetric penalty that prevents element inversion —
+a key advantage over SVK.
+
+#### NewtonRaphsonCachedK
+
+For materials where `C_tangent` is independent of `F` (currently SVK), the tangent stiffness matrix
+`K` is constant. `NewtonRaphsonCachedK` exploits this by factorizing `K` once at `u = 0` and
+reusing the LU factorization at each Newton iteration:
+
+- Standard `NewtonRaphson`: `N` iterations × `(O(n_elem)` assemble K + `O(n³)` factorize + `O(n²)` solve`)`
+- `NewtonRaphsonCachedK`: `1×O(n³)` factorize + `N` iterations × `(O(n_elem)` assemble f_int + `O(n²)` solve`)`
+
+For a mesh with `n` free DOFs and `N = 5` Newton iterations, the savings are `4×O(n³)` factorizations.
+The cost reduction becomes significant for meshes above a few hundred nodes where `O(n³)` dominates.
+
+**Do not use with Neo-Hookean** — `K` depends on `F` for NH, so a cached factorization at `u=0`
+would produce incorrect search directions after the first iteration.
+
+### Test case 1 — Neo-Hookean: zero stress and energy at rest
+
+At `F = I`: `C = I`, `C⁻¹ = I`, `J = 1`, `ln J = 0`. Therefore `S = μ(I−I) + 0 = 0`
+and `W = μ/2·(3−3) − 0 + 0 = 0` exactly.
+
+| Quantity | Value |
+|---|---|
+| `‖S(F=I)‖` | < 1×10⁻¹⁰ |
+| `W(F=I)` | < 1×10⁻¹⁰ |
+| Status | PASS |
+
+### Test case 2 — Neo-Hookean: tangent at identity matches Hooke
+
+At `F = I`, `C_tangent` must equal the Hooke matrix `λ(I⊗I) + 2μ·I⁽⁴⁾`, identical to SVK
+and linear elasticity. Verified by comparing the full 6×6 matrix.
+
+| Quantity | Value |
+|---|---|
+| `‖C_NH(F=I) − C_Hooke‖` | < 1×10⁻⁸ |
+| Status | PASS |
+
+### Test case 3 — Neo-Hookean: tangent symmetry
+
+`C_tangent` must be symmetric for any physically admissible `F` (det > 0).
+Verified on a general deformation gradient with `J > 0`.
+
+| Quantity | Value |
+|---|---|
+| Max asymmetry `‖C − Cᵀ‖` | < 1×10⁻¹⁰ |
+| Status | PASS |
+
+### Test case 4 — Neo-Hookean: convergence to linear for small deformations
+
+For `‖∇u‖ → 0`, NH must converge to linear elastic stress, same as SVK. Verified with
+displacement gradient scaled by `1e-4`: relative error between NH `pk2_stress` and linear `C:ε`
+is below `1×10⁻³`. Also verified that NH and SVK agree to `1×10⁻³` at scale `1e-5`.
+
+| Quantity | Value |
+|---|---|
+| `‖S_NH − C:ε‖ / ‖C:ε‖` (scale 1e-4) | < 1×10⁻³ |
+| `‖S_NH − S_SVK‖ / ‖S_SVK‖` (scale 1e-5) | < 1×10⁻³ |
+| Status | PASS |
+
+### Test case 5 — Neo-Hookean: numerical tangent consistency
+
+The analytical `C_tangent` is verified against central finite differences on `S(E)`, using symmetric
+perturbations of `E` via Cholesky decomposition (`F = chol(I + 2E)ᵀ`) to ensure each Voigt
+direction is isolated exactly. Shear directions use `dE_rc = h/2` to account for the engineering
+shear convention.
+
+| Quantity | Value |
+|---|---|
+| Max relative error `‖dS_analytical − dS_FD‖ / ‖dS_FD‖` | < 1×10⁻⁴ |
+| Status | PASS |
+
+### Test case 6 — NewtonRaphsonCachedK: convergence and residual
+
+Same bar benchmark as v0.4 test case 4 (`nx=3, ny=nz=2`, `F=1`, `E=1×10⁶`, SVK material).
+`NewtonRaphsonCachedK` must converge and satisfy `‖R‖ / ‖f_ext‖ < 1×10⁻⁶` at convergence.
+
+| Quantity | Value |
+|---|---|
+| Normalized residual at convergence | < 1×10⁻⁶ |
+| Status | PASS |
+
+### Test case 7 — NewtonRaphsonCachedK matches NewtonRaphson
+
+Both solvers applied to the same SVK problem (`nx=4, ny=nz=2`, `F=10`) must produce displacement
+vectors that agree to relative error `< 1×10⁻⁵`. This confirms that caching K does not affect
+the solution for SVK, only the computational cost.
+
+| Quantity | Value |
+|---|---|
+| `‖u_Newton − u_CachedK‖ / ‖u_Newton‖` | < 1×10⁻⁵ |
+| Status | PASS |
+
+### Summary
+
+| Test | Description | Status |
+|---|---|---|
+| `test_nh_pk2_zero_at_identity` | `S(F=I) = 0` exactly | PASS |
+| `test_nh_strain_energy_zero_at_identity` | `W(F=I) = 0` exactly | PASS |
+| `test_nh_strain_energy_non_negative` | `W ≥ 0` for admissible F | PASS |
+| `test_nh_tangent_at_identity_matches_hooke` | `C_NH(F=I) = C_Hooke` | PASS |
+| `test_nh_tangent_symmetric` | `C_tangent` is symmetric | PASS |
+| `test_nh_converges_to_linear_for_small_deformations` | NH → linear as `‖∇u‖ → 0` | PASS |
+| `test_nh_matches_svk_small_strain` | NH and SVK agree for small strains | PASS |
+| `test_nh_tangent_numerical_consistency` | Analytical tangent matches finite differences | PASS |
+| `test_cached_k_converges_for_svk` | CachedK converges for SVK | PASS |
+| `test_cached_k_satisfies_residual` | CachedK residual < 1×10⁻⁶ | PASS |
+| `test_cached_k_matches_newton_for_svk` | CachedK and Newton give identical solution | PASS |
+| All v0.1–v0.4 tests | Unchanged | PASS |

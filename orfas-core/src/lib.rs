@@ -13,7 +13,7 @@ mod integration_tests {
     use crate::material::SaintVenantKirchhoff;
     use crate::assembler::{Assembler, LinearBMatrix};
     use crate::boundary::{
-        BoundaryConditionResult, BoundaryConditions, Constraint,
+        BoundaryConditions, Constraint,
         EliminationMethod, FixedNode, Load, PenaltyMethod,
     };
     use crate::solver::{DirectSolver, NonlinearSolver, NewtonRaphson, Solver};
@@ -140,7 +140,6 @@ mod integration_tests {
             let bc = make_bc(nx, ny, nz, &tips,
                 Vector3::new(0.0, -f_total / nb_tip, 0.0),
                 Box::new(PenaltyMethod));
-            let bc_result = bc.apply(&k, mesh.nodes.len());
             let bc_result = bc.apply(&k, mesh.nodes.len());
             let u_red = DirectSolver.solve(&bc_result.k, &bc_result.f).unwrap();
             let u = bc_result.reconstruct(u_red);
