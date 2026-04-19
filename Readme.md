@@ -187,13 +187,42 @@ Exposes vector operations (`v_op`, `add_mv`) inspired by SOFA's `MechanicalState
 | **v0.3** | ✅ Done | Dynamic simulation, implicit Euler time integration, Rayleigh damping, MechanicalState |
 | **v0.4** | ✅ Done | Nonlinear materials (SVK), Newton-Raphson solver, nonlinear implicit Euler, refactored MaterialLaw |
 | **v0.5** | ✅ Done | Neo-Hookean material, NewtonRaphsonCachedK, viewer refactor, improved camera |
-| **v0.6** | ⬜ Planned | Python bindings via PyO3, numpy-compatible API |
-| **v0.7** | ⬜ Planned | Mesh/mesh contact and collision detection |
-| **v0.8** | ⬜ Planned | Tool/mesh contact for surgical interaction |
-| **v0.9** | ⬜ Planned | Sparse solvers, parallelism, performance optimization |
-| **v0.10** | ⬜ Planned | Real-time simulation with hard timing constraints |
-| **v0.11** | ⬜ Planned | Haptic feedback interface |
-| **v1.0** | ⬜ Planned | C/C++ FFI bindings — integration as a SOFA plugin |
+| **v0.6.0** | ⬜ Planned | **Performance** — sparse solvers (nalgebra-sparse), conjugate gradient with ILU preconditioner |
+| **v0.6.1** | ⬜ Planned | **Performance** — multi-threaded assembly (rayon), parallel force assembly |
+| **v0.7.0** | ⬜ Planned | **Materials** — Mooney-Rivlin, Ogden |
+| **v0.7.1** | ⬜ Planned | **Materials** — Holzapfel-Ogden (anisotropic fibers), viscoelastic (Maxwell, Kelvin-Voigt) |
+| **v0.7.2** | ⬜ Planned | **Materials** — `orfas-tissues` preset library with nominal values, confidence intervals and literature references; automatic thermodynamic consistency checks (non-negative energy, objectivity, positive-definiteness of tangent) |
+| **v0.8.0** | ⬜ Planned | **Elements** — `FiniteElement` trait abstraction, Tet10 (quadratic, reduces shear locking) |
+| **v0.8.1** | ⬜ Planned | **Elements** — Hex8, shells, beams |
+| **v0.9.0** | ⬜ Planned | **I/O** — VTU/VTK export (ParaView), OBJ/STL/MSH import |
+| **v0.9.1** | ⬜ Planned | **I/O** — `.orfas` simulation file format (mesh, material, BCs, solver params, ORFAS version hash, results checksum — designed for scientific reproducibility and publication); per-element field export (stress, strain, energy), force-displacement CSV, structured per-timestep logging |
+| **v0.10.0** | ⬜ Planned | **Scientific** — SI unit system via `uom` crate, compile-time unit safety (Pa vs kPa, mm vs m), documented numerical precision per solver |
+| **v0.10.1** | ⬜ Planned | **Scientific** — standardized validation metrics (Hausdorff distance, nodal RMSE, force-displacement curve error), parametric sensitivity analysis |
+| **v0.10.2** | ⬜ Planned | **Scientific** — automated analytical benchmarks (traction, bending, torsion, internal pressure) with pass/fail reports and convergence curves; numerical regression snapshot testing |
+| **v0.11.0** | ⬜ Planned | **Architecture** — stable public trait audit, `SimulationPlugin` trait, static and dynamic plugin loading (`libloading`), `orfas-plugin-template` crate, API versioning with semver |
+| **v0.11.1** | ⬜ Planned | **Architecture** — multi-object scene graph, `BarycentricMapping`, `RigidMapping`; prerequisite for multi-body and visual rendering |
+| **v0.11.2** | ⬜ Planned | **Architecture** — `.orfas` format extended for full scene graph serialization |
+| **v0.12.0** | ⬜ Planned | **Rendering** — OpenGL/wgpu renderer, separate visual mesh from simulation mesh |
+| **v0.12.1** | ⬜ Planned | **Rendering** — shaders, transparency, colormap pipeline, clinician-friendly viewer |
+| **v0.13.0** | ⬜ Planned | **Multi-body** — rigid bodies (6 DOF), FEM-rigid coupling |
+| **v0.13.1** | ⬜ Planned | **Multi-body** — articulated constraints (revolute, ball-and-socket) |
+| **v0.14.0** | ⬜ Planned | **Contact** — broad-phase collision detection (BVH/AABB) |
+| **v0.14.1** | ⬜ Planned | **Contact** — LCP formulation, Projected Gauss-Seidel solver, Coulomb friction |
+| **v0.14.2** | ⬜ Planned | **Contact** — self-contact (hollow organs, folding soft tissue, brain under compression) |
+| **v0.14.3** | ⬜ Planned | **Contact** — tool/mesh contact, surgical instrument interaction, haptic-ready force feedback pipeline |
+| **v0.15.0** | ⬜ Planned | **Reduction** — modal decomposition, model order reduction (ROM) |
+| **v0.15.1** | ⬜ Planned | **Reduction** — reduced basis methods; prerequisite for real-time and haptic on realistic meshes |
+| **v0.16.0** | ⬜ Planned | **Topology** — infrastructure for runtime mesh modification (add/remove elements) |
+| **v0.16.1** | ⬜ Planned | **Topology** — real-time cutting with local remeshing, suture simulation |
+| **v0.17.0** | ⬜ Planned | **Inverse** — gradient descent and Nelder-Mead parameter identification, identify E/ν/μ from experimental data, patient-specific calibration |
+| **v0.17.1** | ⬜ Planned | **Inverse** — Bayesian uncertainty propagation, Monte Carlo and polynomial chaos expansion, confidence interval maps on simulation results |
+| **v0.18.0** | ⬜ Planned | **Interfaces** — Python bindings via PyO3, numpy-compatible API, Jupyter-friendly scripting |
+| **v0.18.1** | ⬜ Planned | **Interfaces** — WebAssembly via wasm-bindgen, browser-based simulation, JavaScript/TypeScript API; enables surgical training platforms and shareable preoperative planning |
+| **v0.18.2** | ⬜ Planned | **Interfaces** — DICOM/NIfTI import, ITK/SimpleITK integration via Python bindings, automated patient-specific meshing from CT/MRI |
+| **v0.19.0** | ⬜ Planned | **Real-time** — hard timing constraints (<10ms/frame), adaptive time stepping, simulation thread decoupled from render thread |
+| **v0.19.1** | ⬜ Planned | **Real-time** — 1000Hz haptic loop, force rendering, integration with Geomagic/OpenHaptics |
+| **v1.0** | ⬜ Planned | **Release** — stable C ABI, C/C++ FFI bindings, integration as a SOFA plugin, clinical-grade API documentation |
+| **v1.x** | ⬜ Planned | **Clinical validation** — benchmarks against experimental datasets, patient-specific case studies, publication of validation results |
 
 ---
 
