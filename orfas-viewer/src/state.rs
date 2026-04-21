@@ -19,6 +19,9 @@ pub enum SolverChoice {
     Direct,
     Newton,
     NewtonCachedK,
+    /// Sparse Newton-Raphson with conjugate gradient solver.
+    /// Preferred for large meshes (> 1000 nodes).
+    NewtonSparse,
 }
 
 #[derive(PartialEq)]
@@ -83,8 +86,6 @@ impl Camera {
 
     /// Returns the eye position in world space.
     pub fn eye(&self) -> Vector3<f32> {
-        // Direction from target to eye, in camera space = (0, 0, 1)
-        // Rotate by pitch then yaw to get world-space direction
         let dir = self.view_direction();
         self.target - dir * self.distance
     }
@@ -95,7 +96,6 @@ impl Camera {
         let sin_yaw   = self.yaw.sin();
         let cos_pitch = self.pitch.cos();
         let sin_pitch = self.pitch.sin();
-        // Spherical to cartesian, looking toward -Z in camera space
         Vector3::new(
             sin_yaw * cos_pitch,
             -sin_pitch,
@@ -120,21 +120,18 @@ impl Camera {
     /// Projects a world-space point onto the screen using perspective division.
     /// `center` is the screen center, `scale` is the pixel-per-unit factor.
     pub fn project(&self, point: &Vector3<f64>, center: egui::Pos2, scale: f32) -> egui::Pos2 {
-        // Translate relative to target first
         let p = point.cast::<f32>() - self.target;
 
         let right   = self.right();
         let up      = self.up();
         let forward = self.view_direction();
 
-        // Project onto camera axes
         let rx =  p.dot(&right);
         let ry =  p.dot(&up);
         let rz =  p.dot(&forward);
 
-        // Perspective: eye is at -distance along forward from target
         let depth = self.distance - rz;
-        let depth = depth.max(1e-3); // avoid division by zero
+        let depth = depth.max(1e-3);
 
         let sx = center.x + rx / depth * scale;
         let sy = center.y - ry / depth * scale;
@@ -144,7 +141,6 @@ impl Camera {
     /// Pan: translate target in the screen plane by `delta` pixels.
     /// `scale` is the same pixel-per-unit factor used in project().
     pub fn pan(&mut self, delta: egui::Vec2, scale: f32) {
-        // How many world units per pixel at the target distance?
         let units_per_pixel = self.distance / scale;
         let right = self.right();
         let up    = self.up();

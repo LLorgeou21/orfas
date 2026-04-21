@@ -1,4 +1,5 @@
 use nalgebra::{DMatrix, DVector, Matrix3, SMatrix, Vector3};
+use nalgebra_sparse::{CooMatrix,CsrMatrix};
 use crate::material::MaterialLaw;
 use crate::mesh::Mesh;
 
@@ -193,6 +194,49 @@ impl Assembler {
         k
     }
 
+    /// Assembles the sparse tangent stiffness matrix K = sum_e Bt * C * B * V.
+    /// Builds a CooMatrix during assembly, then converts to CsrMatrix.
+    /// The sparsity pattern is not precalculated — entries are pushed per element.
+    /// For small meshes, prefer assemble_tangent (dense).
+    pub fn assemble_tangent_sparse<B: BMatrix>(
+        &self,
+        mesh: &Mesh,
+        material: &dyn MaterialLaw,
+        u: &DVector<f64>,
+    )  -> CsrMatrix<f64> {
+        let n = 3* mesh.nodes.len();
+        let mut k = CooMatrix::zeros(n, n);
+
+        for (elem_idx, &[a, b, c, d]) in self.connectivity.iter().enumerate() {
+            let geo = &self.geometry[elem_idx];
+            if geo.volume < 1e-10 { continue; }
+
+            let u0 = Self::node_displacement(u, a);
+            let u1 = Self::node_displacement(u, b);
+            let u2 = Self::node_displacement(u, c);
+            let u3 = Self::node_displacement(u, d);
+
+            let f_grad = compute_deformation_gradient(
+                &u0, &u1, &u2, &u3,
+                &geo.b, &geo.c, &geo.d,
+            );
+
+            let b_mat = B::compute(&geo.b, &geo.c, &geo.d, geo.volume, &f_grad);
+            let c_mat = material.tangent_stiffness(&f_grad);
+            let ke = b_mat.transpose() * c_mat * b_mat * geo.volume;
+
+            let global_indices = [a, b, c, d];
+            for r in 0..4 {
+                for s in 0..4 {
+                    let block = ke.fixed_view::<3, 3>(3 * r, 3 * s).into_owned();
+                    k.push_matrix(3 * global_indices[r], 3 * global_indices[s], &block);
+                }
+            }
+        }
+        CsrMatrix::from(&k)
+    }
+
+
     /// Assemble le vecteur des forces internes f_int.
     /// Pour chaque element : f_int_i = V * P^T * gradNi
     /// avec P = F * S (PK1) et S = pk2_stress(F) (PK2).
@@ -339,4 +383,22 @@ mod tests {
         let expected = 1000.0 * 1.0;
         assert!((total - expected).abs() / expected < 1e-10);
     }
+
+    /// assemble_tangent_sparse = assemble_tangent
+    #[test]
+    fn test_assemble_method_comparaison(){
+        let mesh = unit_mesh();
+        let mat = svk();
+        let assembler = Assembler::new(&mesh);
+        let n = 3 * mesh.nodes.len();
+        let u_zero = DVector::zeros(n);
+        
+        let k_dense = assembler.assemble_tangent::<LinearBMatrix>(&mesh, &mat, &u_zero);
+        let k_sparse = assembler.assemble_tangent_sparse::<LinearBMatrix>(&mesh, &mat, &u_zero);
+
+        let k_dense_from_sparse = DMatrix::from(&k_sparse);
+        let diff = (k_dense - k_dense_from_sparse).abs().max();
+        assert!(diff < 1e-9, "diff = {:.2e}", diff);
+    }
+
 }

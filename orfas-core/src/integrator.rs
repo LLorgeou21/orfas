@@ -4,7 +4,7 @@ use crate::boundary::BoundaryConditionResult;
 use crate::material::MaterialLaw;
 use crate::mechanical_state::MechanicalState;
 use crate::mesh::Mesh;
-use crate::solver::{restrict_matrix, restrict_vector, Solver, SolverError};
+use crate::solver::{restrict_matrix, restrict_vector, DenseSolver, SolverError};
 
 // ─── Trait ────────────────────────────────────────────────────────────────────
 
@@ -12,7 +12,7 @@ use crate::solver::{restrict_matrix, restrict_vector, Solver, SolverError};
 ///
 /// In v0.4 the integrator owns the Newton-Raphson loop internally —
 /// consistent with SOFA's EulerImplicitSolver which embeds its own
-/// nonlinear solve rather than delegating to an external Newton solver.
+/// nonlinear solve rather than delegating to an external Newton DenseSolver.
 ///
 /// The MechanicalState (position, velocity) lives in the reduced space
 /// of free DOFs produced by BoundaryConditionResult.
@@ -40,7 +40,7 @@ pub trait IntegratorMethod {
         mesh:           &Mesh,
         material:       &dyn MaterialLaw,
         bc_result:      &BoundaryConditionResult,
-        linear_solver:  &dyn Solver,
+        linear_solver:  &dyn DenseSolver,
     ) -> Result<(), SolverError>;
 }
 
@@ -96,7 +96,7 @@ impl IntegratorMethod for ImplicitEulerIntegrator {
         mesh:          &Mesh,
         material:      &dyn MaterialLaw,
         bc_result:     &BoundaryConditionResult,
-        linear_solver: &dyn Solver,
+        linear_solver: &dyn DenseSolver,
     ) -> Result<(), SolverError> {
 
         let n = mass.len();
@@ -187,8 +187,8 @@ mod tests {
     use crate::mesh::Mesh;
     use nalgebra::Vector3;
 
-    /// Avec amortissement fort, la simulation dynamique doit converger
-    /// vers la solution statique (meme benchmark que v0.3 mais avec SVK).
+    /// With strong damping, the dynamic simulation must converge
+    /// to the static solution (same benchmark as v0.3 but with SVK).
     #[test]
     fn test_implicit_euler_converges_to_static() {
         let nx = 5; let ny = 2; let nz = 2;
@@ -277,6 +277,6 @@ mod tests {
             "dynamic={:.8} static={:.8} error={:.4}%",
             mean_dyn, mean_static, error * 100.0
         );
-        assert!(error < 0.01, "Dynamique doit converger vers statique : {:.4}%", error * 100.0);
+        assert!(error < 0.01, "Dynamic simulation must converge to static solution: {:.4}%", error * 100.0);
     }
 }

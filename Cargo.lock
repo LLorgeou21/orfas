@@ -2377,6 +2377,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "nalgebra-sparse"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df054d7815152d4e66955fc59a1f97f4036e5103134a381b6b54ec55babfa6b7"
+dependencies = [
+ "nalgebra",
+ "num-traits",
+ "pest",
+ "pest_derive",
+]
+
+[[package]]
 name = "nano-gemm"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2936,6 +2948,7 @@ version = "0.1.0"
 dependencies = [
  "faer",
  "nalgebra",
+ "nalgebra-sparse",
 ]
 
 [[package]]

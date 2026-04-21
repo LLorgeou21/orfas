@@ -23,7 +23,7 @@ ORFAS solves the static linear elasticity problem `K·u = f` using the displacem
 
 **Boundary conditions:** Zero-displacement Dirichlet conditions are enforced via the penalty method: diagonal entries of `K` corresponding to fixed degrees of freedom are replaced by a large value (10³⁰), forcing the associated displacements to near zero.
 
-**Solver:** The linear system `K·u = f` is solved by LU decomposition (dense, via nalgebra). This is appropriate for small to medium meshes. Sparse solvers and iterative methods (conjugate gradient) are planned for future versions.
+**Solver:** The linear system `K·u = f` is solved by LU decomposition (dense, via nalgebra). This is appropriate for small to medium meshes. Sparse solvers and iterative methods (conjugate gradient) are available from v0.6.0.
 
 ### Test case 1 — Axial traction
 
@@ -411,3 +411,97 @@ the solution for SVK, only the computational cost.
 | `test_cached_k_satisfies_residual` | CachedK residual < 1×10⁻⁶ | PASS |
 | `test_cached_k_matches_newton_for_svk` | CachedK and Newton give identical solution | PASS |
 | All v0.1–v0.4 tests | Unchanged | PASS |
+
+---
+
+## v0.6.0 — Sparse solvers
+
+**Linear solver:** `CgSolver` — preconditioned conjugate gradient on `CsrMatrix<f64>`
+**Preconditioner:** `Identity` (default) or `ILU(0)` (incomplete LU, zero fill-in)
+**Nonlinear solver:** `NewtonRaphsonSparse` — Newton-Raphson with sparse tangent assembly
+**Sparse assembly:** `assemble_tangent_sparse` — builds `CsrMatrix` via COO accumulation
+
+### Method
+
+#### Sparse assembly
+
+`assemble_tangent_sparse` mirrors `assemble_tangent` but accumulates element stiffness blocks into a
+`CooMatrix` (coordinate format) instead of a `DMatrix`. The COO matrix is converted to `CsrMatrix`
+at the end via `CsrMatrix::from(&coo)`. Duplicate entries at shared nodes are summed during
+conversion, which is equivalent to the `+=` accumulation in the dense version.
+
+#### Conjugate gradient
+
+The preconditioned CG algorithm solves `K·x = f` iteratively. With preconditioner `M`:
+
+```
+z = M⁻¹·r
+p = z,  rz = r·z
+loop:
+  kp = K·p
+  alpha = rz / p·kp
+  x += alpha·p,  r -= alpha·kp
+  z = M⁻¹·r
+  rz_new = r·z
+  beta = rz_new / rz
+  p = z + beta·p
+  rz = rz_new
+```
+
+Convergence is checked on `‖r‖ < tolerance`. CG requires `K` to be symmetric positive definite —
+guaranteed after correct boundary condition application.
+
+#### ILU(0) preconditioner
+
+ILU(0) computes an approximate LU factorization `K ≈ L·U` keeping only the non-zero pattern of `K`
+(zero fill-in). The factorization uses a dense row buffer strategy: for each row `i`, the non-zero
+entries are loaded into a buffer of size `n`, updated using previously factored rows, then split into
+`L` (lower, unit diagonal) and `U` (upper) stored as separate `CsrMatrix`. Application of `M⁻¹`
+requires two triangular solves: forward substitution on `L`, then backward substitution on `U`.
+
+#### restrict_matrix_sparse
+
+The sparse equivalent of `restrict_matrix` — filters `CsrMatrix` triplets `(i, j, v)` keeping only
+entries where both `i` and `j` are in `free_dofs`. A `HashMap<usize, usize>` maps global indices to
+local indices in the reduced system. This is O(nnz) in the number of non-zeros.
+
+### Test case 1 — Sparse assembly matches dense assembly
+
+`assemble_tangent_sparse` and `assemble_tangent` must produce the same stiffness matrix on the same
+mesh and material. The sparse result is converted to `DMatrix` and compared entry-wise.
+
+| Quantity | Value |
+|---|---|
+| Max entry difference `‖K_dense − K_sparse‖_∞` | < 1×10⁻⁹ |
+| Status | PASS |
+
+*Note: tolerance set to `1e-9` rather than `1e-10` due to different floating-point accumulation order between COO push and dense `+=`.*
+
+### Test case 2 — NewtonRaphsonSparse matches NewtonRaphson
+
+`NewtonRaphsonSparse + CgSolver` must produce the same displacement vector as `NewtonRaphson + DirectSolver`
+on the same SVK problem (`nx=3, ny=nz=2`, `F=1`, `E=1×10⁶`, elimination method).
+
+| Quantity | Value |
+|---|---|
+| `‖u_dense − u_sparse‖ / ‖u_dense‖` | < 1×10⁻⁶ |
+| Status | PASS |
+
+### Test case 3 — ILU(0) preconditioner matches Identity
+
+`CgSolver` with `Preconditioner::Ilu(0)` must produce the same displacement vector as
+`CgSolver` with `Preconditioner::Identity` on the same SVK problem.
+
+| Quantity | Value |
+|---|---|
+| `‖u_ilu0 − u_identity‖ / ‖u_ilu0‖` | < 1×10⁻⁶ |
+| Status | PASS |
+
+### Summary
+
+| Test | Description | Status |
+|---|---|---|
+| `test_assemble_method_comparaison` | Sparse and dense assembly agree to < 1×10⁻⁹ | PASS |
+| `test_newton_sparse_matches_dense` | NewtonRaphsonSparse matches NewtonRaphson | PASS |
+| `test_cg_ilu_matches_identity` | ILU(0) and Identity CG give identical solution | PASS |
+| All v0.1–v0.5 tests | Unchanged | PASS |

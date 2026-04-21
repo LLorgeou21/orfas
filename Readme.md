@@ -103,12 +103,18 @@ material laws requires no changes to the assembly or solver.
 **`BoundaryConditionMethod`** — Defines how Dirichlet boundary conditions are applied to the system.
 Current implementations: penalty method and elimination method.
 
-**`Solver`** — Solves the assembled linear system `K·u = f`.
-Current implementation: direct LU decomposition via nalgebra.
+**`DenseSolver`** — Solves the assembled dense linear system `K·u = f`.
+Current implementation: `DirectSolver` — direct LU decomposition via nalgebra.
 
-**`NonlinearSolver`** — Solves the nonlinear static problem `R(u) = f_int(u) - f_ext = 0`.
+**`SparseSolver`** — Solves the assembled sparse linear system `K·u = f` (via `CsrMatrix`).
+Current implementation: `CgSolver` — preconditioned conjugate gradient with `Identity` or `ILU(0)` preconditioner.
+
+**`NonlinearSolver`** — Solves the nonlinear static problem `R(u) = f_int(u) - f_ext = 0` using dense assembly.
 Current implementations: `NewtonRaphson` (reassembles K at each iteration) and
 `NewtonRaphsonCachedK` (factorizes K once, for materials with constant tangent stiffness such as SVK).
+
+**`NonlinearSparseSolver`** — Solves the same nonlinear static problem using sparse assembly (`CsrMatrix`).
+Current implementation: `NewtonRaphsonSparse` — preferred for large meshes (> 1000 nodes).
 
 **`DampingModel`** — Defines how the damping matrix `C` is computed from the mass and stiffness matrices.
 Current implementation: Rayleigh damping `C = α·M + β·K`.
@@ -122,6 +128,17 @@ Exposes vector operations (`v_op`, `add_mv`) inspired by SOFA's `MechanicalState
 ---
 
 ## Changelog
+
+### v0.6.0
+- **Sparse solvers** (`orfas-core/src/sparse.rs`) — new module providing sparse linear and nonlinear solvers
+- **`SparseSolver` trait** — mirror of `DenseSolver` operating on `CsrMatrix<f64>` (nalgebra-sparse)
+- **`CgSolver`** — preconditioned conjugate gradient solver; supports `Preconditioner::Identity` and `Preconditioner::Ilu(k)`
+- **`ILU(0)` preconditioner** — incomplete LU factorization with zero fill-in; implemented from scratch using a sparse row buffer strategy; includes `forward_substitution` and `backward_substitution` for triangular solves
+- **`assemble_tangent_sparse`** — new sparse assembly method on `Assembler`, building a `CsrMatrix` via COO accumulation; pattern not precalculated, entries pushed per element
+- **`NonlinearSparseSolver` trait** and **`NewtonRaphsonSparse`** — sparse equivalent of `NewtonRaphson`; uses `assemble_tangent_sparse` and `restrict_matrix_sparse` internally
+- **`restrict_matrix_sparse`** — filters `CsrMatrix` triplets to free DOFs via `HashMap<global, local>` mapping
+- **`DenseSolver` rename** — `Solver` trait renamed to `DenseSolver` for clarity; all existing implementations and call sites updated
+- **Viewer** — `SolverChoice::NewtonSparse` added; selectable as "Newton (sparse CG)" in the UI
 
 ### v0.5
 - **Neo-Hookean hyperelastic material** (`NeoHookean`) — compressible formulation:
@@ -140,35 +157,24 @@ Exposes vector operations (`v_op`, `add_mv`) inspired by SOFA's `MechanicalState
 - Nonlinear hyperelastic material: `SaintVenantKirchhoff` — replaces `LinearElastic`, reduces to linear elasticity for small deformations
 - Fully refactored `MaterialLaw` trait: `pk2_stress(F)`, `tangent_stiffness(F)`, `strain_energy(F)` — all taking the deformation gradient `F` as input
 - `NonlinearSolver` trait and `NewtonRaphson` implementation with SOFA-style normalized convergence criteria
-- `assemble_tangent` and `assemble_internal_forces` on `Assembler` — geometry cached at init, forces computed from `F = I + Σ uᵢ ⊗ ∇Nᵢ`
-- `ImplicitEulerIntegrator` extended with internal Newton-Raphson loop — nonlinear dynamic simulation
-- `BoundaryConditionResult::reconstruct_ref` — non-consuming reconstruction for use inside iterative loops
-- `restrict_matrix` / `restrict_vector` — shared helpers for free-DOF extraction, used by both solver and integrator
-- Viewer updated: `SaintVenantKirchhoff` material, `Newton-Raphson` solver selectable in UI
+- `BoundaryConditionResult::reconstruct_ref` — non-consuming reconstruction for Newton loops
+- Nonlinear implicit Euler integrator — Newton-Raphson loop inside the time step; system matrix `A = M/dt + C + dt·K_tangent`
 
 ### v0.3
-- Dynamic simulation via implicit Euler time integration
-- Lumped mass matrix assembly (`assemble_mass` on `Assembler`)
-- Rayleigh damping (`DampingModel` trait, `RayleighDamping` implementation)
-- `MechanicalState` struct with position, velocity, acceleration and vector operations
-- `IntegratorMethod` trait and `ImplicitEulerIntegrator` implementation
-- Refactored boundary conditions: `Constraint` and `Load` as independent scene components (removed `fixed` from `Node`)
-- Real-time dynamic simulation in the viewer: Initialize / Play / Pause / Reset
-- Static and dynamic simulation modes selectable in the UI
-- Scrollable left panel in the viewer
-- `density` added to `MaterialLaw` trait and `LinearElastic`
-- Rayleigh coefficients α, β and time step `dt` exposed in the UI
+- Dynamic simulation: `MechanicalState` (position, velocity, acceleration as `DVector<f64>`)
+- Lumped mass assembly (`assemble_mass`) — 1/4 of element mass per connected node
+- Rayleigh damping `C = α·M + β·K`
+- Implicit Euler integrator — unconditionally stable, Newton loop for nonlinear materials
+- `restrict_matrix` / `restrict_vector` — helpers for extracting free DOFs
 
 ### v0.2
-- Load external tetrahedral meshes from `.vtk` files (`orfas-io`)
-- Per-node force assignment via interactive viewer
-- Per-direction boundary conditions (`FixedNode` with x/y/z bools)
-- Elimination method for boundary conditions (reduces system size, more numerically stable than penalty)
-- Interactive node inspector: click a node to view its position, toggle fixed, set applied force
-- Fixed nodes and force-loaded nodes highlighted in the viewer
+- `read_vtk` in `orfas-io` — ASCII VTK parser, state machine, line-by-line
+- `EliminationMethod` — reduces system to free DOFs, more stable than penalty
+- `FixedNode` with per-axis flags — directional constraints
+- `BoundaryConditionResult` — separates reduced and full DOF spaces
+- Node inspector in viewer — click to select, toggle fixed, apply force
 
 ### v0.1
-- Static 3D FEM solver for linear elastic materials
 - Linear tetrahedral elements (CST 3D) with constant strain-displacement matrix B
 - Structured mesh generation (`Mesh::generate`)
 - Penalty method for zero-displacement boundary conditions
@@ -187,7 +193,7 @@ Exposes vector operations (`v_op`, `add_mv`) inspired by SOFA's `MechanicalState
 | **v0.3** | ✅ Done | Dynamic simulation, implicit Euler time integration, Rayleigh damping, MechanicalState |
 | **v0.4** | ✅ Done | Nonlinear materials (SVK), Newton-Raphson solver, nonlinear implicit Euler, refactored MaterialLaw |
 | **v0.5** | ✅ Done | Neo-Hookean material, NewtonRaphsonCachedK, viewer refactor, improved camera |
-| **v0.6.0** | ⬜ Planned | **Performance** — sparse solvers (nalgebra-sparse), conjugate gradient with ILU preconditioner |
+| **v0.6.0** | ✅ Done | **Performance** — sparse solvers (CsrMatrix), conjugate gradient with ILU(0) preconditioner, NewtonRaphsonSparse |
 | **v0.6.1** | ⬜ Planned | **Performance** — multi-threaded assembly (rayon), parallel force assembly |
 | **v0.7.0** | ⬜ Planned | **Materials** — Mooney-Rivlin, Ogden |
 | **v0.7.1** | ⬜ Planned | **Materials** — Holzapfel-Ogden (anisotropic fibers), viscoelastic (Maxwell, Kelvin-Voigt) |

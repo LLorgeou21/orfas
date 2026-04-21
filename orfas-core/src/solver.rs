@@ -1,6 +1,6 @@
 use nalgebra::{DMatrix, DVector};
 use nalgebra::linalg::LU;
-use crate::assembler::{Assembler, BMatrix, LinearBMatrix};
+use crate::assembler::{Assembler, BMatrix};
 use crate::boundary::BoundaryConditionResult;
 use crate::material::MaterialLaw;
 use crate::mesh::Mesh;
@@ -20,12 +20,13 @@ pub enum SolverError {
     MaxIterationsReached { residual: f64, correction: f64 },
 }
 
-// ─── Linear solver ────────────────────────────────────────────────────────────
+// ─── Dense linear solver ──────────────────────────────────────────────────────
 
-/// Solves a linear system K*u = f.
+/// Solves a dense linear system K*u = f.
 /// U is organized as [ux0, uy0, uz0, ux1, uy1, uz1, ...] —
 /// 3 components per node in the same order as the mesh node list.
-pub trait Solver {
+/// For large meshes, prefer SparseSolver (see sparse.rs).
+pub trait DenseSolver {
     fn solve(&self, k: &DMatrix<f64>, f: &DVector<f64>) -> Result<DVector<f64>, SolverError>;
 }
 
@@ -33,7 +34,7 @@ pub trait Solver {
 /// Suitable for small to medium meshes. O(n^3) in time, O(n^2) in memory.
 pub struct DirectSolver;
 
-impl Solver for DirectSolver {
+impl DenseSolver for DirectSolver {
     fn solve(&self, k: &DMatrix<f64>, f: &DVector<f64>) -> Result<DVector<f64>, SolverError> {
         let lu = LU::new(k.clone());
         lu.solve(f).ok_or(SolverError::SingularMatrix)
@@ -47,6 +48,7 @@ impl Solver for DirectSolver {
 ///
 /// Returns the reduced displacement vector u_reduced on convergence.
 /// Use BoundaryConditionResult::reconstruct to get the full displacement vector.
+/// For large meshes, prefer NonlinearSparseSolver (see sparse.rs).
 pub trait NonlinearSolver {
     fn solve<B: BMatrix>(
         &self,
@@ -54,11 +56,11 @@ pub trait NonlinearSolver {
         mesh:          &Mesh,
         material:      &dyn MaterialLaw,
         bc_result:     &BoundaryConditionResult,
-        linear_solver: &dyn Solver,
+        linear_solver: &dyn DenseSolver,
     ) -> Result<DVector<f64>, SolverError>;
 }
 
-/// Newton-Raphson nonlinear solver.
+/// Newton-Raphson nonlinear dense solver.
 ///
 /// At each iteration:
 ///   1. Assemble K_tangent(u) and f_int(u) on the full mesh
@@ -95,7 +97,7 @@ impl NonlinearSolver for NewtonRaphson {
         mesh:          &Mesh,
         material:      &dyn MaterialLaw,
         bc_result:     &BoundaryConditionResult,
-        linear_solver: &dyn Solver,
+        linear_solver: &dyn DenseSolver,
     ) -> Result<DVector<f64>, SolverError> {
 
         let n_full     = bc_result.n_dofs;
@@ -111,7 +113,7 @@ impl NonlinearSolver for NewtonRaphson {
             let u_full = bc_result.reconstruct_ref(&u_reduced, n_full);
 
             // Assemble K_tangent and f_int on the full mesh
-            let k_full    = assembler.assemble_tangent::<B>(mesh, material, &u_full);
+            let k_full     = assembler.assemble_tangent::<B>(mesh, material, &u_full);
             let f_int_full = assembler.assemble_internal_forces(mesh, material, &u_full);
 
             // Restrict to free DOFs
@@ -149,7 +151,7 @@ impl NonlinearSolver for NewtonRaphson {
 
 // ─── Newton-Raphson with cached K ────────────────────────────────────────────
 
-/// Newton-Raphson solver that factorizes K_tangent only once, at u=0.
+/// Newton-Raphson dense solver that factorizes K_tangent only once, at u=0.
 ///
 /// Valid only for materials where K_tangent is independent of u — currently
 /// Saint Venant-Kirchhoff (C_tangent = Hooke, constant).
@@ -163,7 +165,7 @@ impl NonlinearSolver for NewtonRaphson {
 ///   6. Update u_reduced += du
 ///
 /// Cost vs NewtonRaphson:
-///   NewtonRaphson      : max_iter * (O(n^3) assemble_K + O(n^3) factorize + O(n^2) solve)
+///   NewtonRaphson       : max_iter * (O(n^3) assemble_K + O(n^3) factorize + O(n^2) solve)
 ///   NewtonRaphsonCachedK: 1 * O(n^3) factorize + max_iter * (O(n_elems) f_int + O(n^2) solve)
 ///
 /// Do NOT use with Neo-Hookean or any material where tangent_stiffness depends on F.
@@ -192,7 +194,7 @@ impl NonlinearSolver for NewtonRaphsonCachedK {
         mesh:          &Mesh,
         material:      &dyn MaterialLaw,
         bc_result:     &BoundaryConditionResult,
-        linear_solver: &dyn Solver,
+        _linear_solver: &dyn DenseSolver,
     ) -> Result<DVector<f64>, SolverError> {
 
         let n_full     = bc_result.n_dofs;
@@ -200,10 +202,10 @@ impl NonlinearSolver for NewtonRaphsonCachedK {
         let f_ext_norm = f_ext_red.norm().max(1e-14);
 
         // Assemble and factorize K once at u=0
-        let u_zero  = DVector::zeros(n_full);
-        let k_full  = assembler.assemble_tangent::<B>(mesh, material, &u_zero);
-        let k_red   = restrict_matrix(&k_full, &bc_result.free_dofs);
-        let lu      = LU::new(k_red);
+        let u_zero = DVector::zeros(n_full);
+        let k_full = assembler.assemble_tangent::<B>(mesh, material, &u_zero);
+        let k_red  = restrict_matrix(&k_full, &bc_result.free_dofs);
+        let lu     = LU::new(k_red);
 
         let mut u_reduced = DVector::zeros(f_ext_red.len());
 
@@ -246,9 +248,10 @@ impl NonlinearSolver for NewtonRaphsonCachedK {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-/// Restricts a full square matrix to the free DOFs.
+/// Restricts a full dense square matrix to the free DOFs.
 /// Uses row-major indexing (r, s) — consistent with EliminationMethod.
 /// For penalty method (free_dofs = None), returns the full matrix.
+/// For sparse matrices, see restrict_matrix_sparse in sparse.rs.
 pub fn restrict_matrix(
     k_full:    &DMatrix<f64>,
     free_dofs: &Option<Vec<usize>>,
@@ -263,6 +266,7 @@ pub fn restrict_matrix(
 }
 
 /// Restricts a full vector to the free DOFs.
+/// Shared between dense and sparse solvers — DVector is format-independent.
 /// For penalty method (free_dofs = None), returns the full vector.
 pub fn restrict_vector(
     f_full:    &DVector<f64>,
@@ -298,7 +302,7 @@ mod tests {
     }
 
     fn make_bc_elim(
-        mesh: &Mesh, nx: usize, ny: usize, nz: usize,
+        _mesh: &Mesh, nx: usize, ny: usize, nz: usize,
         tips: &[usize], force: Vector3<f64>,
     ) -> BoundaryConditions {
         let constraint = Constraint {
@@ -310,9 +314,9 @@ mod tests {
         BoundaryConditions::new(constraint, vec![load], Box::new(EliminationMethod))
     }
 
-    /// Newton doit converger pour SVK (tangente constante).
-    /// SVK n'est pas lineaire — f_int depend de E = 0.5*(F^T*F - I).
-    /// Newton converge vers la vraie solution SVK, pas la solution lineaire exacte.
+    /// Newton must converge for SVK (constant tangent stiffness).
+    /// SVK is nonlinear — f_int depends on E = 0.5*(F^T*F - I).
+    /// Newton converges to the true SVK solution, not the linearized one.
     #[test]
     fn test_newton_converges_for_svk() {
         let nx = 3; let ny = 2; let nz = 2;
@@ -324,10 +328,10 @@ mod tests {
 
         let newton = NewtonRaphson { max_iter: 20, tol_residual: 1e-8, tol_correction: 1e-8 };
         let result = newton.solve::<LinearBMatrix>(&assembler, &mesh, &mat, &bc_result, &DirectSolver);
-        assert!(result.is_ok(), "Newton doit converger pour SVK : {:?}", result);
+        assert!(result.is_ok(), "Newton must converge for SVK: {:?}", result);
     }
 
-    /// CachedK doit converger pour SVK.
+    /// CachedK must converge for SVK.
     #[test]
     fn test_cached_k_converges_for_svk() {
         let nx = 3; let ny = 2; let nz = 2;
@@ -339,11 +343,11 @@ mod tests {
 
         let solver = NewtonRaphsonCachedK { max_iter: 20, tol_residual: 1e-8, tol_correction: 1e-8 };
         let result = solver.solve::<LinearBMatrix>(&assembler, &mesh, &mat, &bc_result, &DirectSolver);
-        assert!(result.is_ok(), "CachedK doit converger pour SVK : {:?}", result);
+        assert!(result.is_ok(), "CachedK must converge for SVK: {:?}", result);
     }
 
-    /// CachedK et Newton doivent donner le meme resultat sur SVK.
-    /// La solution etant identique, l'ecart doit etre < tol_residual.
+    /// CachedK and Newton must give the same result on SVK.
+    /// The solutions being identical, the difference must be < tol_residual.
     #[test]
     fn test_cached_k_matches_newton_for_svk() {
         let nx = 4; let ny = 2; let nz = 2;
@@ -364,11 +368,11 @@ mod tests {
             .unwrap();
 
         let error = (&u_newton - &u_cached).norm() / u_newton.norm();
-        println!("CachedK vs Newton : error = {:.2e}", error);
-        assert!(error < 1e-5, "CachedK et Newton doivent donner le meme resultat : {:.2e}", error);
+        println!("CachedK vs Newton: error = {:.2e}", error);
+        assert!(error < 1e-5, "CachedK and Newton must give the same result: {:.2e}", error);
     }
 
-    /// CachedK doit satisfaire le residu f_int(u) - f_ext = 0 a la convergence.
+    /// CachedK must satisfy the residual f_int(u) - f_ext = 0 at convergence.
     #[test]
     fn test_cached_k_satisfies_residual() {
         let nx = 3; let ny = 2; let nz = 2;
@@ -388,8 +392,14 @@ mod tests {
         let f_int_full = assembler.assemble_internal_forces(&mesh, &mat, &u_full);
         let f_int_red  = restrict_vector(&f_int_full, &bc_result.free_dofs);
         let residual   = (&f_int_red - &f_ext).norm() / f_ext.norm();
-        println!("CachedK residual : {:.2e}", residual);
-        assert!(residual < 1e-6, "Residu CachedK trop grand : {:.2e}", residual);
+        println!("CachedK residual: {:.2e}", residual);
+        assert!(residual < 1e-6, "CachedK residual too large: {:.2e}", residual);
+    }
+
+    /// Newton must satisfy the residual f_int(u) - f_ext = 0 at convergence.
+    /// Verifies that the Newton solution satisfies mechanical equilibrium.
+    #[test]
+    fn test_newton_satisfies_residual() {
         let nx = 3; let ny = 2; let nz = 2;
         let (mesh, mat, assembler, tips) = make_bar(nx, ny, nz);
         let u_zero = DVector::zeros(3 * mesh.nodes.len());
@@ -397,18 +407,18 @@ mod tests {
         let bc = make_bc_elim(&mesh, nx, ny, nz, &tips, Vector3::new(1.0, 0.0, 0.0));
         let bc_result = bc.apply(&k, mesh.nodes.len());
         let n_full = bc_result.n_dofs;
-        let f_ext = bc_result.f.clone();
+        let f_ext  = bc_result.f.clone();
 
         let u_newton_red = NewtonRaphson::default()
             .solve::<LinearBMatrix>(&assembler, &mesh, &mat, &bc_result, &DirectSolver)
             .unwrap();
 
-        // Verifier que f_int(u) ~ f_ext
-        let u_full = bc_result.reconstruct_ref(&u_newton_red, n_full);
+        // Verify that f_int(u) ~ f_ext
+        let u_full     = bc_result.reconstruct_ref(&u_newton_red, n_full);
         let f_int_full = assembler.assemble_internal_forces(&mesh, &mat, &u_full);
-        let f_int_red = restrict_vector(&f_int_full, &bc_result.free_dofs);
+        let f_int_red  = restrict_vector(&f_int_full, &bc_result.free_dofs);
         let residual_norm = (&f_int_red - &f_ext).norm() / f_ext.norm();
-        println!("Newton residual : {:.2e}", residual_norm);
-        assert!(residual_norm < 1e-6, "Residu Newton trop grand : {:.2e}", residual_norm);
+        println!("Newton residual: {:.2e}", residual_norm);
+        assert!(residual_norm < 1e-6, "Newton residual too large: {:.2e}", residual_norm);
     }
 }

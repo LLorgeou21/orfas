@@ -6,6 +6,7 @@ pub mod solver;
 pub mod damping;
 pub mod integrator;
 pub mod mechanical_state;
+pub mod sparse;
 
 #[cfg(test)]
 mod integration_tests {
@@ -16,7 +17,7 @@ mod integration_tests {
         BoundaryConditions, Constraint,
         EliminationMethod, FixedNode, Load, PenaltyMethod,
     };
-    use crate::solver::{DirectSolver, NonlinearSolver, NewtonRaphson, Solver};
+    use crate::solver::{DirectSolver, NonlinearSolver, NewtonRaphson, DenseSolver};
     use crate::damping::{DampingModel, RayleighDamping};
     use crate::integrator::{ImplicitEulerIntegrator, IntegratorMethod};
     use crate::mechanical_state::MechanicalState;

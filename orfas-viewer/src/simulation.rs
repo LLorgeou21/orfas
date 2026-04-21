@@ -8,7 +8,8 @@ use orfas_core::{
     damping::{DampingModel, RayleighDamping},
     mesh::Mesh,
     mechanical_state::MechanicalState,
-    solver::{DirectSolver, NewtonRaphson, NewtonRaphsonCachedK, NonlinearSolver, Solver},
+    solver::{DirectSolver, NewtonRaphson, NewtonRaphsonCachedK, NonlinearSolver, DenseSolver},
+    sparse::{CgSolver, NewtonRaphsonSparse, NonlinearSparseSolver},
 };
 
 use crate::state::{AppState, BoundaryChoice, SolverChoice, make_material};
@@ -32,7 +33,6 @@ pub fn build_simulation(
         }
     };
 
-    // Focus camera on the mesh bounding box
     state.camera.focus_on_mesh(&mesh.nodes);
 
     let material  = make_material(state);
@@ -90,6 +90,13 @@ pub fn run_simulation_static(state: &mut AppState) {
             SolverChoice::NewtonCachedK => NewtonRaphsonCachedK::default()
                 .solve::<LinearBMatrix>(
                     &assembler, &mesh, material.as_ref(), &bc_result, &DirectSolver,
+                )
+                .map(|u_red| bc_result.reconstruct(u_red)),
+
+            // Sparse Newton-Raphson with CG solver — preferred for large meshes.
+            SolverChoice::NewtonSparse => NewtonRaphsonSparse::default()
+                .solve::<LinearBMatrix>(
+                    &assembler, &mesh, material.as_ref(), &bc_result, &CgSolver::default(),
                 )
                 .map(|u_red| bc_result.reconstruct(u_red)),
         };

@@ -123,11 +123,13 @@ impl MyEguiApp {
                     SolverChoice::Direct        => "Direct LU",
                     SolverChoice::Newton        => "Newton-Raphson",
                     SolverChoice::NewtonCachedK => "Newton (cached K)",
+                    SolverChoice::NewtonSparse  => "Newton (sparse CG)",
                 })
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut self.state.solver, SolverChoice::Direct,        "Direct LU");
                     ui.selectable_value(&mut self.state.solver, SolverChoice::Newton,        "Newton-Raphson");
                     ui.selectable_value(&mut self.state.solver, SolverChoice::NewtonCachedK, "Newton (cached K)");
+                    ui.selectable_value(&mut self.state.solver, SolverChoice::NewtonSparse,  "Newton (sparse CG)");
                 });
 
             egui::ComboBox::from_label("Boundary")
