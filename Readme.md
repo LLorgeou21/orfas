@@ -129,6 +129,16 @@ Exposes vector operations (`v_op`, `add_mv`) inspired by SOFA's `MechanicalState
 
 ## Changelog
 
+### v0.6.1
+- **`SparseAssemblyStrategy` trait** — generic assembly strategy for `NewtonRaphsonSparse`; two implementations: `Sequential` (existing) and `Parallel` (new)
+- **`NewtonRaphsonSparse<S: SparseAssemblyStrategy>`** — refactored to be generic over the assembly strategy; zero code duplication between sequential and parallel variants
+- **`assemble_tangent_sparse_parallel`** — parallel sparse assembly via rayon + atomic f64 additions (`fetch_update`); ~10x speedup on meshes > 8000 nodes (measured on 20-core machine)
+- **Pre-built CSR pattern** in `Assembler` — sparsity pattern computed once at `Assembler::new` via `build_csr_pattern`; reused at every assembly call; eliminates COO→CSR sorting overhead
+- **`entry_map`** — `HashMap<(i,j), idx>` cached at `Assembler::new`; enables O(1) direct write into CSR values array per element
+- **`build_element_colors`** — greedy graph coloring of elements (available, unused); stored as `Option<Vec<Vec<usize>>>` in `Assembler` for future use
+- **Viewer** — `SolverChoice::NewtonSparseParallel` added; selectable as "Newton (sparse CG parallel)" in the UI
+- **`assemble_internal_forces_parallel`** — evaluated and abandoned; assembly too fast (~11ms) for rayon overhead to pay off on any mesh size tested
+
 ### v0.6.0
 - **Sparse solvers** (`orfas-core/src/sparse.rs`) — new module providing sparse linear and nonlinear solvers
 - **`SparseSolver` trait** — mirror of `DenseSolver` operating on `CsrMatrix<f64>` (nalgebra-sparse)
@@ -194,7 +204,7 @@ Exposes vector operations (`v_op`, `add_mv`) inspired by SOFA's `MechanicalState
 | **v0.4** | ✅ Done | Nonlinear materials (SVK), Newton-Raphson solver, nonlinear implicit Euler, refactored MaterialLaw |
 | **v0.5** | ✅ Done | Neo-Hookean material, NewtonRaphsonCachedK, viewer refactor, improved camera |
 | **v0.6.0** | ✅ Done | **Performance** — sparse solvers (CsrMatrix), conjugate gradient with ILU(0) preconditioner, NewtonRaphsonSparse |
-| **v0.6.1** | ⬜ Planned | **Performance** — multi-threaded assembly (rayon), parallel force assembly |
+| **v0.6.1** | ✅ Done | **Performance** — parallel sparse assembly (rayon, ~10x speedup), pre-built CSR pattern, SparseAssemblyStrategy trait |
 | **v0.7.0** | ⬜ Planned | **Materials** — Mooney-Rivlin, Ogden |
 | **v0.7.1** | ⬜ Planned | **Materials** — Holzapfel-Ogden (anisotropic fibers), viscoelastic (Maxwell, Kelvin-Voigt) |
 | **v0.7.2** | ⬜ Planned | **Materials** — `orfas-tissues` preset library with nominal values, confidence intervals and literature references; automatic thermodynamic consistency checks (non-negative energy, objectivity, positive-definiteness of tangent) |

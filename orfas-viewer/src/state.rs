@@ -19,9 +19,12 @@ pub enum SolverChoice {
     Direct,
     Newton,
     NewtonCachedK,
-    /// Sparse Newton-Raphson with conjugate gradient solver.
+    /// Sparse Newton-Raphson with conjugate gradient solver — sequential assembly.
     /// Preferred for large meshes (> 1000 nodes).
     NewtonSparse,
+    /// Sparse Newton-Raphson with conjugate gradient solver — parallel assembly.
+    /// Recommended for very large meshes (> 8000 nodes) where parallelism pays off.
+    NewtonSparseParallel,
 }
 
 #[derive(PartialEq)]

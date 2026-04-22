@@ -87,7 +87,7 @@ fn nh_tangent_voigt(c_inv: &Matrix3<f64>, lambda: f64, coeff: f64) -> Matrix6<f6
 /// - pk2_stress returns S (2nd Piola-Kirchhoff, symmetric, reference frame)
 /// - The assembler computes P = F*S (1st Piola-Kirchhoff) internally for assembly
 /// - tangent_stiffness returns dS/dE in Voigt notation (6x6)
-pub trait MaterialLaw {
+pub trait MaterialLaw : Sync {
     /// Mass density (kg/m3) of the material in the reference configuration.
     fn density(&self) -> f64;
 

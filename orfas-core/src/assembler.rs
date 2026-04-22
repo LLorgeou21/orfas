@@ -2,6 +2,8 @@ use nalgebra::{DMatrix, DVector, Matrix3, SMatrix, Vector3};
 use nalgebra_sparse::{CooMatrix,CsrMatrix};
 use crate::material::MaterialLaw;
 use crate::mesh::Mesh;
+use rayon::prelude::*;
+use std::collections::{HashMap,HashSet};
 
 type Matrix6x12 = SMatrix<f64, 6, 12>;
 
@@ -113,11 +115,130 @@ struct ElementGeometry {
     d:      [f64; 4],
 }
 
+/// Computes a greedy element coloring for parallel assembly.
+/// Elements of the same color share no nodes — safe to assemble in parallel
+/// without atomic operations or locks.
+///
+/// Algorithm:
+///   1. Build node -> elements map (adjacency inverse)
+///   2. For each element, collect colors used by neighboring elements
+///   3. Assign the smallest available color
+///
+/// Returns colors[c] = list of element indices with color c.
+/// Number of colors is typically 5-10 for tetrahedral meshes.
+fn build_element_colors(connectivity: &[[usize; 4]]) -> Vec<Vec<usize>> {
+    let n_elems = connectivity.len();
+
+    // Step 1 — node -> elements map
+    let mut node_to_elems: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (elem_idx, &[a, b, c, d]) in connectivity.iter().enumerate() {
+        for &node in &[a, b, c, d] {
+            node_to_elems.entry(node).or_insert_with(Vec::new).push(elem_idx);
+        }
+    }
+
+    // Step 2 & 3 — greedy coloring
+    let mut elem_color = vec![usize::MAX; n_elems];
+
+    for elem_idx in 0..n_elems {
+        // Collect colors used by neighboring elements
+        let mut used_colors: std::collections::HashSet<usize> = HashSet::new();
+        for &node in &connectivity[elem_idx] {
+            if let Some(neighbors) = node_to_elems.get(&node) {
+                for &neighbor in neighbors {
+                    if neighbor != elem_idx && elem_color[neighbor] != usize::MAX {
+                        used_colors.insert(elem_color[neighbor]);
+                    }
+                }
+            }
+        }
+
+        // Assign smallest available color
+        let mut color = 0;
+        while used_colors.contains(&color) {
+            color += 1;
+        }
+        elem_color[elem_idx] = color;
+    }
+
+    // Group elements by color
+    let n_colors = *elem_color.iter().max().unwrap_or(&0) + 1;
+    let mut colors: Vec<Vec<usize>> = vec![Vec::new(); n_colors];
+    for (elem_idx, &color) in elem_color.iter().enumerate() {
+        colors[color].push(elem_idx);
+    }
+
+    colors
+}
+
+/// Pre-computes the CSR sparsity pattern from the mesh connectivity.
+/// For each tetrahedron, the 4 nodes are fully coupled — all 4x4x9 = 144
+/// (i,j) DOF pairs are non-zero. Pairs are deduplicated via BTreeSet
+/// (sorted row-major) and converted directly to CSR data arrays.
+/// Also builds entry_map: (i,j) -> flat index in the CSR values Vec.
+/// This is called once at Assembler::new and reused at every assembly.
+fn build_csr_pattern(
+    connectivity: &[[usize; 4]],
+    n: usize,
+) -> (CsrMatrix<f64>, HashMap<(usize, usize), usize>) {
+    // BTreeSet gives sorted row-major order for free — required by CSR format
+    let mut pairs: std::collections::BTreeSet<(usize, usize)> = Default::default();
+    for &[a, b, c, d] in connectivity {
+        let nodes = [a, b, c, d];
+        for &r in &nodes {
+            for &s in &nodes {
+                for dr in 0..3 {
+                    for dc in 0..3 {
+                        pairs.insert((3 * r + dr, 3 * s + dc));
+                    }
+                }
+            }
+        }
+    }
+
+    // Build CSR arrays directly from sorted pairs — no COO intermediate
+    let mut row_offsets = vec![0usize; n + 1];
+    let mut col_indices = Vec::with_capacity(pairs.len());
+    let values         = vec![0.0f64; pairs.len()];
+
+    for &(i, j) in &pairs {
+        row_offsets[i + 1] += 1;
+        col_indices.push(j);
+    }
+    // Prefix sum to get row offsets
+    for i in 0..n {
+        row_offsets[i + 1] += row_offsets[i];
+    }
+
+    let csr = CsrMatrix::try_from_csr_data(n, n, row_offsets, col_indices, values)
+        .expect("Invalid CSR pattern in build_csr_pattern");
+
+    // entry_map: (i,j) -> flat index in values Vec
+    // BTreeSet iteration order is sorted — same order as CSR values array
+    let entry_map: HashMap<(usize, usize), usize> = pairs
+        .into_iter()
+        .enumerate()
+        .map(|(idx, pair)| (pair, idx))
+        .collect();
+
+    (csr, entry_map)
+}
+
 pub struct Assembler {
-    /// Table de connectivite : 4 indices globaux par tetraedre.
+    /// Connectivity table: 4 global node indices per tetrahedron.
     connectivity: Vec<[usize; 4]>,
-    /// Donnees geometriques de reference cachees par element.
+    /// Reference geometry cached per element.
     geometry:     Vec<ElementGeometry>,
+    /// Pre-built sparse pattern — fixed for the lifetime of the assembler.
+    /// Reused at every sparse assembly call to avoid repeated COO->CSR conversion.
+    csr_pattern:  CsrMatrix<f64>,
+    /// Maps (i, j) DOF pair to its flat index in the CSR values array.
+    /// Built once at Assembler::new alongside csr_pattern.
+    entry_map:    HashMap<(usize, usize), usize>,
+    /// Element coloring for parallel assembly.
+    /// colors[c] = list of element indices with color c.
+    /// Elements of the same color share no nodes — safe to assemble in parallel.
+    colors:       Option<Vec<Vec<usize>>>
 }
 
 impl Assembler {
@@ -142,8 +263,13 @@ impl Assembler {
             })
             .collect();
 
-        Assembler { connectivity, geometry }
+        let n = 3 * mesh.nodes.len();
+        let (csr_pattern, entry_map) = build_csr_pattern(&connectivity, n);
+        //let colors = build_element_colors(&connectivity);
+        Assembler { connectivity, geometry, csr_pattern, entry_map, colors : None }
     }
+
+    
 
     /// Deplacement du noeud i depuis le vecteur u global.
     fn node_displacement(u: &DVector<f64>, i: usize) -> Vector3<f64> {
@@ -194,18 +320,96 @@ impl Assembler {
         k
     }
 
+
+    /// Assembles the sparse tangent stiffness matrix K in parallel using rayon.
+    /// Uses atomic f64 additions via fetch_update — no unsafe, no coloring required.
+    /// Each entry in the CSR values array is updated atomically, preventing races
+    /// on shared nodes between threads.
+    ///
+    /// Prefer this over assemble_tangent_sparse for large meshes.
+    pub fn assemble_tangent_sparse_parallel<B: BMatrix>(
+        &self,
+        mesh:     &Mesh,
+        material: &dyn MaterialLaw,
+        u:        &DVector<f64>,
+    ) -> CsrMatrix<f64> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let mut k = self.csr_pattern.clone();
+        let n_vals = k.values().len();
+
+        // Atomic values array — one AtomicU64 per CSR entry
+        // f64 bits are stored as u64 to enable atomic addition
+        let atomic_values: Vec<AtomicU64> = (0..n_vals)
+            .map(|_| AtomicU64::new(0u64))
+            .collect();
+
+        self.connectivity
+            .par_iter()
+            .enumerate()
+            .for_each(|(elem_idx, &[a, b, c, d])| {
+                let geo = &self.geometry[elem_idx];
+                if geo.volume < 1e-10 { return; }
+
+                let u0 = Self::node_displacement(u, a);
+                let u1 = Self::node_displacement(u, b);
+                let u2 = Self::node_displacement(u, c);
+                let u3 = Self::node_displacement(u, d);
+
+                let f_grad = compute_deformation_gradient(
+                    &u0, &u1, &u2, &u3,
+                    &geo.b, &geo.c, &geo.d,
+                );
+
+                let b_mat = B::compute(&geo.b, &geo.c, &geo.d, geo.volume, &f_grad);
+                let c_mat = material.tangent_stiffness(&f_grad);
+                let ke = b_mat.transpose() * c_mat * b_mat * geo.volume;
+
+                let global_indices = [a, b, c, d];
+                for r in 0..4 {
+                    for s in 0..4 {
+                        let block = ke.fixed_view::<3, 3>(3 * r, 3 * s);
+                        for dr in 0..3 {
+                            for dc in 0..3 {
+                                let i = 3 * global_indices[r] + dr;
+                                let j = 3 * global_indices[s] + dc;
+                                let idx = self.entry_map[&(i, j)];
+                                let v = block[(dr, dc)];
+                                // Atomic f64 addition: read-modify-write, no race possible
+                                atomic_values[idx].fetch_update(
+                                    Ordering::Relaxed,
+                                    Ordering::Relaxed,
+                                    |old| Some((f64::from_bits(old) + v).to_bits()),
+                                ).unwrap();
+                            }
+                        }
+                    }
+                }
+            });
+
+        // Copy atomic values into CSR matrix
+        let values = k.values_mut();
+        for (i, av) in atomic_values.iter().enumerate() {
+            values[i] = f64::from_bits(av.load(Ordering::Relaxed));
+        }
+        k
+    }
+
     /// Assembles the sparse tangent stiffness matrix K = sum_e Bt * C * B * V.
-    /// Builds a CooMatrix during assembly, then converts to CsrMatrix.
-    /// The sparsity pattern is not precalculated — entries are pushed per element.
-    /// For small meshes, prefer assemble_tangent (dense).
+    /// Uses the pre-built CSR pattern from Assembler::new — avoids COO->CSR
+    /// conversion and sorting overhead. Values are written directly into the
+    /// CSR values array via entry_map lookup.
     pub fn assemble_tangent_sparse<B: BMatrix>(
         &self,
-        mesh: &Mesh,
+        mesh:     &Mesh,
         material: &dyn MaterialLaw,
-        u: &DVector<f64>,
-    )  -> CsrMatrix<f64> {
-        let n = 3* mesh.nodes.len();
-        let mut k = CooMatrix::zeros(n, n);
+        u:        &DVector<f64>,
+    ) -> CsrMatrix<f64> {
+        let mut k = self.csr_pattern.clone();
+        let values = k.values_mut();
+
+        // Zero out values from previous assembly
+        for v in values.iter_mut() { *v = 0.0; }
 
         for (elem_idx, &[a, b, c, d]) in self.connectivity.iter().enumerate() {
             let geo = &self.geometry[elem_idx];
@@ -228,14 +432,20 @@ impl Assembler {
             let global_indices = [a, b, c, d];
             for r in 0..4 {
                 for s in 0..4 {
-                    let block = ke.fixed_view::<3, 3>(3 * r, 3 * s).into_owned();
-                    k.push_matrix(3 * global_indices[r], 3 * global_indices[s], &block);
+                    let block = ke.fixed_view::<3, 3>(3 * r, 3 * s);
+                    for dr in 0..3 {
+                        for dc in 0..3 {
+                            let i = 3 * global_indices[r] + dr;
+                            let j = 3 * global_indices[s] + dc;
+                            let idx = self.entry_map[&(i, j)];
+                            values[idx] += block[(dr, dc)];
+                        }
+                    }
                 }
             }
         }
-        CsrMatrix::from(&k)
+        k
     }
-
 
     /// Assemble le vecteur des forces internes f_int.
     /// Pour chaque element : f_int_i = V * P^T * gradNi
@@ -281,6 +491,8 @@ impl Assembler {
         f_int
     }
 
+
+    
     /// Assemble le vecteur de masse concentree (lumped mass).
     /// Chaque noeud recoit 1/4 de la masse de chaque element connecte.
     /// Stocke comme DVector diagonal (3 DDL par noeud).
@@ -400,5 +612,47 @@ mod tests {
         let diff = (k_dense - k_dense_from_sparse).abs().max();
         assert!(diff < 1e-9, "diff = {:.2e}", diff);
     }
+
+    /// assemble_tangent_sparse = assemble_tangent_sparse_parallel
+    #[test]
+    fn test_assemble_parrallel_method_comparaison(){
+        let mesh = unit_mesh();
+        let mat = svk();
+        let assembler = Assembler::new(&mesh);
+        let n = 3 * mesh.nodes.len();
+        let u_zero = DVector::zeros(n);
+        
+        let k_par = assembler.assemble_tangent_sparse_parallel::<LinearBMatrix>(&mesh, &mat, &u_zero);
+        let k_seq = assembler.assemble_tangent_sparse::<LinearBMatrix>(&mesh, &mat, &u_zero);
+
+
+        let k_seq_dense = DMatrix::from(&k_seq);
+        let k_par_dense = DMatrix::from(&k_par);
+
+        let diff = (k_seq_dense - k_par_dense).abs().max();
+        assert!(diff < 1e-9, "diff = {:.2e}", diff);
+    }
+
+    ///  assemble_tangent_sparse slower than assemble_tangent_sparse_parallel ?
+    #[test]
+    fn test_assemble_parallel_speedup() {
+        let mesh = Mesh::generate(30, 30, 30, 1.0, 1.0, 1.0);
+        let mat  = svk();
+        let assembler = Assembler::new(&mesh);
+        let u_zero = DVector::zeros(3 * mesh.nodes.len());
+
+        let t0 = std::time::Instant::now();
+        let _ = assembler.assemble_tangent_sparse::<LinearBMatrix>(&mesh, &mat, &u_zero);
+        let t_seq = t0.elapsed();
+
+        let t0 = std::time::Instant::now();
+        let _ = assembler.assemble_tangent_sparse_parallel::<LinearBMatrix>(&mesh, &mat, &u_zero);
+        let t_par = t0.elapsed();
+
+        println!("sequential: {:.2?}  parallel: {:.2?}  speedup: {:.2}x",
+            t_seq, t_par, t_seq.as_secs_f64() / t_par.as_secs_f64());
+    }
+
+    
 
 }

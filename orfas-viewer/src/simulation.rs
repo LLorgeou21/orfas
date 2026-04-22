@@ -9,7 +9,7 @@ use orfas_core::{
     mesh::Mesh,
     mechanical_state::MechanicalState,
     solver::{DirectSolver, NewtonRaphson, NewtonRaphsonCachedK, NonlinearSolver, DenseSolver},
-    sparse::{CgSolver, NewtonRaphsonSparse, NonlinearSparseSolver},
+    sparse::{CgSolver, NewtonRaphsonSparse, NonlinearSparseSolver, Parallel, Sequential},
 };
 
 use crate::state::{AppState, BoundaryChoice, SolverChoice, make_material};
@@ -93,8 +93,13 @@ pub fn run_simulation_static(state: &mut AppState) {
                 )
                 .map(|u_red| bc_result.reconstruct(u_red)),
 
-            // Sparse Newton-Raphson with CG solver — preferred for large meshes.
-            SolverChoice::NewtonSparse => NewtonRaphsonSparse::default()
+            SolverChoice::NewtonSparse => NewtonRaphsonSparse::<Sequential>::default()
+                .solve::<LinearBMatrix>(
+                    &assembler, &mesh, material.as_ref(), &bc_result, &CgSolver::default(),
+                )
+                .map(|u_red| bc_result.reconstruct(u_red)),
+
+            SolverChoice::NewtonSparseParallel => NewtonRaphsonSparse::<Parallel>::default()
                 .solve::<LinearBMatrix>(
                     &assembler, &mesh, material.as_ref(), &bc_result, &CgSolver::default(),
                 )

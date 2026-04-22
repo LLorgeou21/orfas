@@ -124,12 +124,14 @@ impl MyEguiApp {
                     SolverChoice::Newton        => "Newton-Raphson",
                     SolverChoice::NewtonCachedK => "Newton (cached K)",
                     SolverChoice::NewtonSparse  => "Newton (sparse CG)",
+                    SolverChoice::NewtonSparseParallel => "Newton (sparse CG parallel)",
                 })
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut self.state.solver, SolverChoice::Direct,        "Direct LU");
                     ui.selectable_value(&mut self.state.solver, SolverChoice::Newton,        "Newton-Raphson");
                     ui.selectable_value(&mut self.state.solver, SolverChoice::NewtonCachedK, "Newton (cached K)");
                     ui.selectable_value(&mut self.state.solver, SolverChoice::NewtonSparse,  "Newton (sparse CG)");
+                    ui.selectable_value(&mut self.state.solver, SolverChoice::NewtonSparseParallel, "Newton (sparse CG parallel)");
                 });
 
             egui::ComboBox::from_label("Boundary")

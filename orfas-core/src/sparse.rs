@@ -119,6 +119,48 @@ impl SparseSolver for CgSolver {
     }
 }
 
+
+/// Strategy trait for sparse tangent assembly.
+/// Allows NewtonRaphsonSparse to be generic over sequential vs parallel assembly.
+pub trait SparseAssemblyStrategy {
+    fn assemble_tangent<B: BMatrix>(
+        assembler: &Assembler,
+        mesh:      &Mesh,
+        material:  &dyn MaterialLaw,
+        u:         &DVector<f64>,
+    ) -> CsrMatrix<f64>;
+}
+
+/// Sequential sparse assembly strategy.
+pub struct Sequential;
+
+/// Parallel sparse assembly strategy (uses atomic f64 additions via rayon).
+/// Recommended for meshes with more than ~1000 nodes.
+pub struct Parallel;
+
+impl SparseAssemblyStrategy for Sequential {
+    fn assemble_tangent<B: BMatrix>(
+        assembler: &Assembler,
+        mesh:      &Mesh,
+        material:  &dyn MaterialLaw,
+        u:         &DVector<f64>,
+    ) -> CsrMatrix<f64> {
+        assembler.assemble_tangent_sparse::<B>(mesh, material, u)
+    }
+}
+
+impl SparseAssemblyStrategy for Parallel {
+    fn assemble_tangent<B: BMatrix>(
+        assembler: &Assembler,
+        mesh:      &Mesh,
+        material:  &dyn MaterialLaw,
+        u:         &DVector<f64>,
+    ) -> CsrMatrix<f64> {
+        assembler.assemble_tangent_sparse_parallel::<B>(mesh, material, u)
+    }
+}
+
+
 // ─── Sparse matrix restriction ────────────────────────────────────────────────
 
 /// Restricts a sparse square matrix to the free DOFs.
@@ -185,23 +227,25 @@ pub trait NonlinearSparseSolver {
 ///   - ||du|| / (||u|| + 1e-14) < tol_correction
 ///
 /// Stops as soon as either criterion is met, or after max_iter iterations.
-pub struct NewtonRaphsonSparse {
+pub struct NewtonRaphsonSparse<S: SparseAssemblyStrategy = Sequential> {
     pub max_iter:       usize,
     pub tol_residual:   f64,
     pub tol_correction: f64,
+    _strategy:          std::marker::PhantomData<S>,
 }
 
-impl Default for NewtonRaphsonSparse {
+impl<S: SparseAssemblyStrategy> Default for NewtonRaphsonSparse<S> {
     fn default() -> Self {
         NewtonRaphsonSparse {
             max_iter:       20,
             tol_residual:   1e-6,
             tol_correction: 1e-6,
+            _strategy:      std::marker::PhantomData,
         }
     }
 }
 
-impl NonlinearSparseSolver for NewtonRaphsonSparse {
+impl<S: SparseAssemblyStrategy> NonlinearSparseSolver for NewtonRaphsonSparse<S> {
     fn solve<B: BMatrix>(
         &self,
         assembler:     &Assembler,
@@ -222,8 +266,8 @@ impl NonlinearSparseSolver for NewtonRaphsonSparse {
             // Reconstruct full displacement to pass to assembler
             let u_full = bc_result.reconstruct_ref(&u_reduced, n_full);
 
-            // Assemble sparse K_tangent and f_int on the full mesh
-            let k_full     = assembler.assemble_tangent_sparse::<B>(mesh, material, &u_full);
+            // Assemble sparse K_tangent via the chosen strategy (Sequential or Parallel)
+            let k_full     = S::assemble_tangent::<B>(assembler, mesh, material, &u_full);
             let f_int_full = assembler.assemble_internal_forces(mesh, material, &u_full);
 
             // Restrict to free DOFs
@@ -430,12 +474,19 @@ mod tests {
             .solve::<LinearBMatrix>(&assembler, &mesh, &mat, &bc_result, &DirectSolver)
             .unwrap();
 
-        let u_sparse = NewtonRaphsonSparse::default()
+        let u_sparse = NewtonRaphsonSparse::<Sequential>::default()
             .solve::<LinearBMatrix>(&assembler, &mesh, &mat, &bc_result, &CgSolver::default())
             .unwrap();
 
         let diff = (&u_dense - &u_sparse).norm() / u_dense.norm();
         assert!(diff < 1e-6, "sparse != dense, diff = {:.2e}", diff);
+
+        let u_sparse_par = NewtonRaphsonSparse::<Parallel>::default()
+            .solve::<LinearBMatrix>(&assembler, &mesh, &mat, &bc_result, &CgSolver::default())
+            .unwrap();
+
+        let diff = (&u_dense - &u_sparse_par).norm() / u_dense.norm();
+        assert!(diff < 1e-6, "parallel sparse != dense, diff = {:.2e}", diff);
     }
 
 
@@ -466,11 +517,11 @@ mod tests {
 
 
         let cgsolver : CgSolver = CgSolver { max_iter: 1000, tolerance: 1e-8, precond: Preconditioner::Ilu(0) };
-        let u_sparse_ilu0 = NewtonRaphsonSparse::default()
+        let u_sparse_ilu0 = NewtonRaphsonSparse::<Sequential>::default()
             .solve::<LinearBMatrix>(&assembler, &mesh, &mat, &bc_result, &cgsolver)
             .unwrap();
 
-        let u_sparse = NewtonRaphsonSparse::default()
+        let u_sparse = NewtonRaphsonSparse::<Sequential>::default()
             .solve::<LinearBMatrix>(&assembler, &mesh, &mat, &bc_result, &CgSolver::default())
             .unwrap();
 

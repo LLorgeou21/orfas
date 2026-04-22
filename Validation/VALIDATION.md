@@ -505,3 +505,67 @@ on the same SVK problem (`nx=3, ny=nz=2`, `F=1`, `E=1×10⁶`, elimination metho
 | `test_newton_sparse_matches_dense` | NewtonRaphsonSparse matches NewtonRaphson | PASS |
 | `test_cg_ilu_matches_identity` | ILU(0) and Identity CG give identical solution | PASS |
 | All v0.1–v0.5 tests | Unchanged | PASS |
+
+## v0.6.1 — Parallel sparse assembly
+
+**Assembly:** `assemble_tangent_sparse_parallel` — rayon + atomic f64 additions
+**Strategy trait:** `SparseAssemblyStrategy` — `Sequential` and `Parallel` implementations
+**Pattern cache:** CSR sparsity pattern pre-built at `Assembler::new`
+
+### Method
+
+#### Pre-built CSR pattern
+
+Previously, `assemble_tangent_sparse` built a `CooMatrix` from scratch at every call and converted it to `CsrMatrix` — an O(nnz·log(nnz)) sort at each Newton iteration. In v0.6.1, the sparsity pattern is computed once at `Assembler::new` via `build_csr_pattern`:
+
+1. All `(i,j)` DOF pairs are collected from the connectivity into a `BTreeSet` (sorted row-major automatically)
+2. CSR arrays (`row_offsets`, `col_indices`) are built directly — no COO intermediate
+3. An `entry_map: HashMap<(i,j), usize>` maps each pair to its flat index in the CSR values array
+
+At each assembly call, values are written directly into the pre-allocated CSR array via `entry_map` lookup — O(1) per entry, no sort, no conversion.
+
+#### Parallel assembly strategy
+
+`assemble_tangent_sparse_parallel` uses `rayon::par_iter` with atomic f64 additions. Each thread computes element stiffness matrices independently and writes contributions directly into the shared CSR values array via `AtomicU64::fetch_update` — a read-modify-write atomic operation that prevents race conditions on shared nodes without locks.
+
+`NewtonRaphsonSparse` is refactored to be generic over `SparseAssemblyStrategy`:
+- `NewtonRaphsonSparse::<Sequential>` — calls `assemble_tangent_sparse`
+- `NewtonRaphsonSparse::<Parallel>` — calls `assemble_tangent_sparse_parallel`
+
+Zero code duplication — the Newton loop is identical for both strategies.
+
+#### assemble_internal_forces_parallel — evaluated and abandoned
+
+A parallel version of `assemble_internal_forces` was implemented and benchmarked. Sequential assembly takes ~11ms on a 30×30×30 mesh — the rayon overhead (~281ms) dwarfs the computation. The function was removed. Parallelism only pays off when per-element computation is expensive enough to amortize thread launch costs; `f_int` assembly is too lightweight.
+
+### Benchmark — parallel speedup vs mesh size
+
+Measured on a 20-core machine (Intel, 28 logical threads), `--release` build, averages over 3 runs.
+
+![Parallel assembly speedup](images/speedup_grid.png)
+
+| Mesh | Nodes | Elements | Sequential | Parallel | Speedup |
+|---|---|---|---|---|---|
+| 3×3×3 | 27 | 48 | 0.28ms | 0.20ms | 1.4x |
+| 5×5×5 | 125 | 384 | 1.93ms | 0.90ms | 2.1x |
+| 8×8×8 | 512 | 2058 | 11.4ms | 2.7ms | 4.3x |
+| 10×10×10 | 1000 | 4374 | 25.4ms | 4.6ms | 5.6x |
+| 15×15×15 | 3375 | 16464 | 125ms | 16ms | 7.9x |
+| 20×20×20 | 8000 | 41154 | 349ms | 39ms | 9.1x |
+| 30×30×30 | 27000 | 146334 | 1555ms | 155ms | 10.0x |
+| 40×40×40 | 64000 | 355914 | 4242ms | 409ms | 10.4x |
+| 60×60×60 | 216000 | 1232274 | 16322ms | 1595ms | 10.2x |
+
+The speedup plateaus at ~10x due to Amdahl's law — the sequential fraction (CSR clone, atomic copy-back) caps the theoretical maximum at the observed level given the available core count.
+
+Break-even point: ~27 nodes (3×3×3 mesh). Below this, rayon overhead exceeds the computation cost.
+
+### Summary
+
+| Test | Description | Status |
+|---|---|---|
+| `test_assemble_parrallel_method_comparaison` | Parallel and sequential sparse assembly agree to < 1×10⁻⁹ | PASS |
+| `test_newton_sparse_matches_dense` | `NewtonRaphsonSparse::<Sequential>` matches `NewtonRaphson` | PASS |
+| `test_newton_sparse_parallel_matches_dense` | `NewtonRaphsonSparse::<Parallel>` matches `NewtonRaphson` | PASS |
+| `test_cg_ilu_matches_identity` | ILU(0) and Identity CG give identical solution | PASS |
+| All v0.1–v0.6.0 tests | Unchanged | PASS |
