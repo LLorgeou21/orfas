@@ -569,3 +569,160 @@ Break-even point: ~27 nodes (3×3×3 mesh). Below this, rayon overhead exceeds t
 | `test_newton_sparse_parallel_matches_dense` | `NewtonRaphsonSparse::<Parallel>` matches `NewtonRaphson` | PASS |
 | `test_cg_ilu_matches_identity` | ILU(0) and Identity CG give identical solution | PASS |
 | All v0.1–v0.6.0 tests | Unchanged | PASS |
+
+## v0.7.0 — Isochoric/volumetric split and hyperelastic material library
+
+**Architecture:** `IsochoricPart` + `VolumetricPart` traits, `CompressibleMaterial<I, V>` composition
+**Isochoric models:** `NeoHookeanIso`, `MooneyRivlinIso`, `OgdenIso`
+**Volumetric models:** `VolumetricLnJ`, `VolumetricQuad`
+**References:** Cheng & Zhang (2018), Connolly et al. (2019)
+
+### Method
+
+#### Isochoric/volumetric split
+
+All compressible hyperelastic models in ORFAS use the Flory multiplicative decomposition of the
+deformation gradient: `F = J^{1/3}·F_bar` where `F_bar` is the isochoric (volume-preserving) part
+and `J = det(F)` is the volumetric part. The strain energy is additively decomposed as:
+W(F) = W_iso(F_bar) + W_vol(J)
+
+The total PK2 stress and tangent stiffness are assembled as:
+S = S_iso + S_vol
+C = C_iso + C_vol
+
+The volumetric contributions are identical for all isochoric models and depend only on `J` and
+`C⁻¹`. The isochoric contributions depend on the modified right Cauchy-Green tensor
+`C_bar = J^{-2/3}·C` and its spectral decomposition (for Ogden).
+
+#### NeoHookeanIso
+
+Isochoric strain energy: `W_iso = μ/2·(Ī₁ − 3)` where `Ī₁ = J^{-2/3}·tr(C)`.
+
+The isochoric PK2 stress and tangent stiffness are derived analytically following Cheng & Zhang
+(2018) eq. (39), using the modified inverse `C̄⁻¹ = J^{2/3}·C⁻¹`:
+S_iso = μ·J^{-2/3}·(I − Ī₁/3·C⁻¹)
+C_iso = μ·J^{-4/3}·[
+−2/3·(C̄⁻¹⊗I + I⊗C̄⁻¹)
++2/9·Ī₁·(C̄⁻¹⊗C̄⁻¹)
++2/3·Ī₁·(C̄⁻¹⊙C̄⁻¹)
+]
+
+#### MooneyRivlinIso
+
+Isochoric strain energy: `W_iso = c₁·(Ī₁ − 3) + c₂·(Ī₂ − 3)`
+where `Ī₁ = J^{-2/3}·tr(C)` and `Ī₂ = J^{-4/3}·I₂`.
+
+The tangent stiffness is derived following Cheng & Zhang (2018) eq. (25), with the same
+`C̄⁻¹ = J^{2/3}·C⁻¹` and `C̄ = J^{-2/3}·C` convention. The parameter relation to the paper is
+`μ₁ = 2c₁`, `μ₂ = 2c₂`.
+
+#### OgdenIso
+
+Isochoric strain energy: `W_iso = Σᵢ μᵢ/αᵢ·(λ̄₁^αᵢ + λ̄₂^αᵢ + λ̄₃^αᵢ − 3)`
+where `λ̄ₖ = J^{-1/3}·λₖ` are the isochoric principal stretches.
+
+The tangent stiffness is computed from the spectral decomposition of C (via nalgebra `SymmetricEigen`)
+following Connolly et al. (2019) eqs. (11), (12), (22), (35):
+S_iso = Σₐ βₐ·λₐ⁻²·(Nₐ⊗Nₐ)
+C_iso = Σₐ,ᵦ (γₐᵦ·λₐ⁻²·λᵦ⁻² − 2δₐᵦ·βₐ·λₐ⁻⁴)·(Nₐ⊗Nₐ⊗Nᵦ⊗Nᵦ)
++ Σₐ≠ᵦ [(βᵦλᵦ⁻² − βₐλₐ⁻²)/(λᵦ² − λₐ²)]·[(Nₐ⊗Nᵦ)⊗(Nₐ⊗Nᵦ + Nᵦ⊗Nₐ)]
+
+where `βₐ` and `γₐᵦ` are the stress and elasticity coefficients. For Ogden, the cross-derivatives
+`∂²W/∂λ̄ₐ∂λ̄ᵦ = 0` for `a ≠ b` (separable energy), simplifying `γₐᵦ` significantly.
+
+When `|λₐ² − λᵦ²| < 10⁻⁶`, L'Hôpital's rule is applied (Connolly eq. 25) to avoid divide-by-zero.
+
+#### VolumetricLnJ
+
+`U(J) = κ/2·(ln J)²`, with `S_vol = κ·ln(J)·C⁻¹` and:
+C_vol = κ·(C⁻¹⊗C⁻¹) − 2κ·ln(J)·(C⁻¹⊙C⁻¹)
+
+Reduces to the bulk modulus penalty at small strains: `C_vol → κ·(I⊗I)` as `J → 1`.
+
+#### VolumetricQuad
+
+`U(J) = κ/2·(J − 1)²`, with `S_vol = κ·(J−1)·C⁻¹` and a corresponding analytic tangent.
+
+---
+
+### Test case 1 — All isochoric models: zero stress and energy at F=I
+
+At `F = I`, `C = I`, `J = 1`, all isochoric invariants reduce to their reference values
+(`Ī₁ = 3`, `Ī₂ = 3`, `λ̄ₖ = 1`). All models must give `W_iso = 0`, `S_iso = 0`.
+
+| Model | `‖S_iso(F=I)‖` | `W_iso(F=I)` | Status |
+|-------|----------------|--------------|--------|
+| NeoHookeanIso | < 1×10⁻¹⁰ | < 1×10⁻¹⁰ | PASS |
+| MooneyRivlinIso | < 1×10⁻¹⁰ | < 1×10⁻¹⁰ | PASS |
+| OgdenIso | < 1×10⁻¹⁰ | < 1×10⁻¹⁰ | PASS |
+
+### Test case 2 — All isochoric models: tangent at F=I matches Hooke
+
+At `F = I`, all models must give `C_total(F=I) = C_Hooke = λ(I⊗I) + 2μ·I⁽⁴⁾`.
+This requires exact cancellation between isochoric and volumetric contributions
+at the reference configuration. The effective shear and bulk moduli are derived
+from the model parameters to ensure small-strain equivalence.
+
+| Model | `‖C(F=I) − C_Hooke‖` | Status |
+|-------|-----------------------|--------|
+| NeoHookeanIso + VolumetricLnJ | < 1×10⁻⁶ | PASS |
+| MooneyRivlinIso + VolumetricLnJ | < 1×10⁻⁶ | PASS |
+| OgdenIso + VolumetricLnJ | < 1×10⁻⁶ | PASS |
+
+### Test case 3 — All isochoric models: numerical tangent consistency
+
+The analytical `C_tangent` is verified against central finite differences on `S(E)` at a
+moderate deformation (`e0` with entries ~0.01–0.02), using symmetric Cholesky perturbations.
+Relative error is computed per column: `‖dS_analytical − dS_FD‖ / ‖dS_FD‖`.
+
+| Model | Max relative error | Status |
+|-------|--------------------|--------|
+| NeoHookeanIso | < 1×10⁻³ | PASS |
+| MooneyRivlinIso | < 1×10⁻³ | PASS |
+| OgdenIso | < 1×10⁻³ | PASS |
+
+### Test case 4 — All isochoric models: convergence to linear for small deformations
+
+For `‖∇u‖ → 0`, all models must converge to the linear elastic stress `C_Hooke:ε`.
+Verified with displacement gradient scaled by `1×10⁻⁴`.
+
+| Model | `‖S − C_Hooke:ε‖ / ‖C_Hooke:ε‖` | Status |
+|-------|-----------------------------------|--------|
+| NeoHookeanIso | < 1×10⁻³ | PASS |
+| MooneyRivlinIso | < 1×10⁻³ | PASS |
+| OgdenIso | < 1×10⁻³ | PASS |
+
+### Test case 5 — Cross-material consistency
+
+NeoHookeanIso and SVK must agree for small strains (scale `1×10⁻⁵`). MooneyRivlinIso with
+`c₂ = 0` must match NeoHookeanIso exactly. OgdenIso with `N=1, α=2, μ₁=μ` must match
+NeoHookeanIso exactly. These cross-checks verify internal consistency of the material library.
+
+| Test | `‖S_A − S_B‖ / ‖S_B‖` | Status |
+|------|------------------------|--------|
+| NH vs SVK (small strain) | < 1×10⁻³ | PASS |
+| MR(c₂=0) vs NH | < 1×10⁻¹⁰ | PASS |
+| Ogden(N=1,α=2) vs NH | < 1×10⁻¹⁰ | PASS |
+
+### Test case 6 — VolumetricLnJ: analytical tangent vs finite differences
+
+The volumetric tangent `C_vol` is verified against finite differences on `S_vol = κ·ln(J)·C⁻¹`
+at the same moderate deformation point. This isolates the volumetric contribution independently
+of the isochoric model.
+
+| Quantity | Value | Status |
+|----------|-------|--------|
+| `‖C_vol − C_vol_FD‖ / ‖C_vol_FD‖` | < 1×10⁻⁴ | PASS |
+
+### Summary
+
+| Test | Description | Status |
+|------|-------------|--------|
+| `test_neo_hookean_standard_suite` | W=0, S=0, C=Hooke, FD consistency, small strain at F=I and moderate F | PASS |
+| `test_mooney_rivlin_standard_suite` | Same standard suite for MooneyRivlinIso | PASS |
+| `test_ogden_standard_suite` | Same standard suite for OgdenIso | PASS |
+| `test_mr_c2_zero_matches_nh` | MR(c₂=0) == NH exactly | PASS |
+| `test_ogden_matches_nh` | Ogden(N=1,α=2) == NH exactly (W, S, C) | PASS |
+| `test_nh_matches_svk_small_strain` | NH and SVK agree for small strains | PASS |
+| `test_cvol_correct` | C_vol matches finite differences on S_vol | PASS |
+| All v0.1–v0.6.1 tests | Unchanged | PASS |
