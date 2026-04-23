@@ -104,6 +104,8 @@ impl MyEguiApp {
                 .selected_text(match self.state.material {
                     MaterialChoice::SaintVenantKirchhoff => "Saint Venant-Kirchhoff",
                     MaterialChoice::NeoHookean           => "Neo-Hookean",
+                    MaterialChoice::MooneyRivlin         => "Mooney-Rivlin",
+                    MaterialChoice::Ogden                => "Ogden"
                 })
                 .show_ui(ui, |ui| {
                     ui.selectable_value(
@@ -115,6 +117,16 @@ impl MyEguiApp {
                         &mut self.state.material,
                         MaterialChoice::NeoHookean,
                         "Neo-Hookean",
+                    );
+                    ui.selectable_value(
+                        &mut self.state.material,
+                        MaterialChoice::MooneyRivlin,
+                        "Mooney-Rivlin",
+                    );
+                    ui.selectable_value(
+                        &mut self.state.material,
+                        MaterialChoice::Ogden,
+                        "Ogden",
                     );
                 });
 

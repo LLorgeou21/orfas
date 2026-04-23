@@ -1,7 +1,9 @@
 use nalgebra::{DMatrix, DVector, Vector3};
 use orfas_core::{
     boundary::{BoundaryConditionResult, Constraint, Load},
-    material::{MaterialLaw, NeoHookean, SaintVenantKirchhoff},
+    material::{CompressibleMaterial, MaterialLaw, 
+           SaintVenantKirchhoff, NeoHookeanIso, MooneyRivlinIso, OgdenIso,
+           VolumetricLnJ, lame},
     mechanical_state::MechanicalState,
     mesh::Mesh,
 };
@@ -12,6 +14,8 @@ use orfas_core::{
 pub enum MaterialChoice {
     SaintVenantKirchhoff,
     NeoHookean,
+    MooneyRivlin,
+    Ogden,
 }
 
 #[derive(PartialEq)]
@@ -162,6 +166,10 @@ pub struct AppState {
     pub youngs_modulus: f64,
     pub poisson_ratio:  f64,
     pub density:        f64,
+    pub c1: f64,
+    pub c2: f64,
+    pub ogden_mu:    Vec<f64>,
+    pub ogden_alpha: Vec<f64>,
     // Dynamic parameters
     pub alpha: f64,
     pub beta:  f64,
@@ -201,6 +209,10 @@ impl AppState {
             youngs_modulus: 1e6,
             poisson_ratio:  0.3,
             density:        1000.0,
+            c1: 500.0,
+            c2: 50.0,
+            ogden_mu:    vec![1000.0],
+            ogden_alpha: vec![2.0],
             alpha: 0.1,
             beta:  0.01,
             dt:    0.01,
@@ -239,10 +251,37 @@ pub fn make_material(state: &AppState) -> Box<dyn MaterialLaw> {
             poisson_ratio:  state.poisson_ratio,
             density:        state.density,
         }),
-        MaterialChoice::NeoHookean => Box::new(NeoHookean {
-            youngs_modulus: state.youngs_modulus,
-            poisson_ratio:  state.poisson_ratio,
-            density:        state.density,
-        }),
+        MaterialChoice::NeoHookean => {
+            let (lambda, mu) = lame(state.youngs_modulus, state.poisson_ratio);
+            let kappa = lambda + 2.0 / 3.0 * mu;
+            Box::new(CompressibleMaterial {
+                iso:     NeoHookeanIso   { mu },
+                vol:     VolumetricLnJ   { kappa },
+                density: state.density,
+            })
+        },
+        MaterialChoice::MooneyRivlin => {
+            let (lambda, mu) = lame(state.youngs_modulus, state.poisson_ratio);
+            let kappa = lambda + 2.0 / 3.0 * mu;
+            // c1 + c2 = mu/2 for small strain equivalence
+            // split 90/10 by default
+            let c1 = 0.45 * mu;
+            let c2 = 0.05 * mu;
+            Box::new(CompressibleMaterial {
+                iso:     MooneyRivlinIso { c1, c2 },
+                vol:     VolumetricLnJ   { kappa },
+                density: state.density,
+            })
+        },
+        MaterialChoice::Ogden => {
+            let (lambda, mu) = lame(state.youngs_modulus, state.poisson_ratio);
+            let kappa = lambda + 2.0 / 3.0 * mu;
+            Box::new(CompressibleMaterial {
+                iso:     OgdenIso::new(vec![mu], vec![2.0])
+                            .unwrap_or_else(|_| OgdenIso::new(vec![1000.0], vec![2.0]).unwrap()),
+                vol:     VolumetricLnJ { kappa },
+                density: state.density,
+            })
+        },
     }
 }
