@@ -3,6 +3,7 @@
 
 use nalgebra::{Matrix3, Matrix6};
 use super::traits::MaterialLaw;
+use crate::material::MaterialContext;
 use super::helpers::{lame, hooke_voigt, green_lagrange};
 
 // ─── SaintVenantKirchhoff ─────────────────────────────────────────────────────
@@ -55,7 +56,7 @@ impl MaterialLaw for SaintVenantKirchhoff {
     fn density(&self) -> f64 { self.density }
 
     /// W = lambda/2 * tr(E)^2 + mu * E:E
-    fn strain_energy(&self, f: &Matrix3<f64>) -> f64 {
+    fn strain_energy(&self, f: &Matrix3<f64>, _ctx: &MaterialContext) -> f64 {
         let (lambda, mu) = lame(self.youngs_modulus, self.poisson_ratio);
         let e = green_lagrange(f);
         let trace_e = e.trace();
@@ -63,14 +64,14 @@ impl MaterialLaw for SaintVenantKirchhoff {
     }
 
     /// S = lambda*tr(E)*I + 2*mu*E
-    fn pk2_stress(&self, f: &Matrix3<f64>) -> Matrix3<f64> {
+    fn pk2_stress(&self, f: &Matrix3<f64>, _ctx: &mut MaterialContext) -> Matrix3<f64> {
         let (lambda, mu) = lame(self.youngs_modulus, self.poisson_ratio);
         let e = green_lagrange(f);
         lambda * e.trace() * Matrix3::identity() + 2.0 * mu * e
     }
 
     /// C = lambda*(I tensor I) + 2*mu*I4 — constant, independent of F.
-    fn tangent_stiffness(&self, _f: &Matrix3<f64>) -> Matrix6<f64> {
+    fn tangent_stiffness(&self, _f: &Matrix3<f64>, _ctx: &MaterialContext) -> Matrix6<f64> {
         let (lambda, mu) = lame(self.youngs_modulus, self.poisson_ratio);
         hooke_voigt(lambda, mu)
     }

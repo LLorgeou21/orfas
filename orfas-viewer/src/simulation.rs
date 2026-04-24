@@ -1,5 +1,6 @@
 use nalgebra::{DMatrix, DVector};
 use orfas_core::{
+    material::SimulationContext,
     assembler::{Assembler, LinearBMatrix},
     boundary::{
         BoundaryConditionResult, BoundaryConditions, Constraint,
@@ -39,7 +40,8 @@ pub fn build_simulation(
     let assembler = Assembler::new(&mesh);
     let u_zero    = DVector::zeros(3 * mesh.nodes.len());
 
-    let k_full = assembler.assemble_tangent::<LinearBMatrix>(&mesh, material.as_ref(), &u_zero);
+    let sim_ctx     = &SimulationContext::isotropic_static(mesh.elements.len());
+    let k_full = assembler.assemble_tangent::<LinearBMatrix>(&mesh, material.as_ref(), &u_zero, &sim_ctx);
     let mass   = assembler.assemble_mass(&mesh, material.as_ref());
     let c_full = RayleighDamping { alpha: state.alpha, beta: state.beta }
         .compute(&mass, &k_full);
@@ -84,24 +86,28 @@ pub fn run_simulation_static(state: &mut AppState) {
             SolverChoice::Newton => NewtonRaphson::default()
                 .solve::<LinearBMatrix>(
                     &assembler, &mesh, material.as_ref(), &bc_result, &DirectSolver,
+                    &SimulationContext::isotropic_static(mesh.elements.len()),
                 )
                 .map(|u_red| bc_result.reconstruct(u_red)),
 
             SolverChoice::NewtonCachedK => NewtonRaphsonCachedK::default()
                 .solve::<LinearBMatrix>(
                     &assembler, &mesh, material.as_ref(), &bc_result, &DirectSolver,
+                    &SimulationContext::isotropic_static(mesh.elements.len()),
                 )
                 .map(|u_red| bc_result.reconstruct(u_red)),
 
             SolverChoice::NewtonSparse => NewtonRaphsonSparse::<Sequential>::default()
                 .solve::<LinearBMatrix>(
                     &assembler, &mesh, material.as_ref(), &bc_result, &CgSolver::default(),
+                    &SimulationContext::isotropic_static(mesh.elements.len()),
                 )
                 .map(|u_red| bc_result.reconstruct(u_red)),
 
             SolverChoice::NewtonSparseParallel => NewtonRaphsonSparse::<Parallel>::default()
                 .solve::<LinearBMatrix>(
                     &assembler, &mesh, material.as_ref(), &bc_result, &CgSolver::default(),
+                    &SimulationContext::isotropic_static(mesh.elements.len()),
                 )
                 .map(|u_red| bc_result.reconstruct(u_red)),
         };

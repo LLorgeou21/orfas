@@ -1,9 +1,9 @@
 use nalgebra::{DMatrix, DVector, Vector3};
 use orfas_core::{
     boundary::{BoundaryConditionResult, Constraint, Load},
-    material::{CompressibleMaterial, MaterialLaw, 
+    material::{CompressibleMaterial, MaterialLaw, CompressibleAnisotropicMaterial,
            SaintVenantKirchhoff, NeoHookeanIso, MooneyRivlinIso, OgdenIso,
-           VolumetricLnJ, lame},
+           VolumetricLnJ, HolzapfelOgden, lame},
     mechanical_state::MechanicalState,
     mesh::Mesh,
 };
@@ -16,6 +16,7 @@ pub enum MaterialChoice {
     NeoHookean,
     MooneyRivlin,
     Ogden,
+    HolzapfelOgden,
 }
 
 #[derive(PartialEq)]
@@ -170,6 +171,9 @@ pub struct AppState {
     pub c2: f64,
     pub ogden_mu:    Vec<f64>,
     pub ogden_alpha: Vec<f64>,
+    pub k1: f64,  // HGO fiber stress parameter
+    pub k2: f64,  // HGO fiber dimensionless parameter
+    pub fiber_angle_deg: f64, // helix angle for fiber field
     // Dynamic parameters
     pub alpha: f64,
     pub beta:  f64,
@@ -213,6 +217,9 @@ impl AppState {
             c2: 50.0,
             ogden_mu:    vec![1000.0],
             ogden_alpha: vec![2.0],
+            k1: 2363.2,       // Pa — media layer artery (Holzapfel & Gasser 2000)
+            k2: 0.8393,
+            fiber_angle_deg: 49.98,
             alpha: 0.1,
             beta:  0.01,
             dt:    0.01,
@@ -280,6 +287,16 @@ pub fn make_material(state: &AppState) -> Box<dyn MaterialLaw> {
                 iso:     OgdenIso::new(vec![mu], vec![2.0])
                             .unwrap_or_else(|_| OgdenIso::new(vec![1000.0], vec![2.0]).unwrap()),
                 vol:     VolumetricLnJ { kappa },
+                density: state.density,
+            })
+        },
+        MaterialChoice::HolzapfelOgden => {
+            let (lambda, mu) = lame(state.youngs_modulus, state.poisson_ratio);
+            let kappa = lambda + 2.0 / 3.0 * mu;
+            Box::new(CompressibleAnisotropicMaterial {
+                iso:     NeoHookeanIso  { mu },
+                aniso:   HolzapfelOgden { k1: state.k1, k2: state.k2 },
+                vol:     VolumetricLnJ  { kappa },
                 density: state.density,
             })
         },

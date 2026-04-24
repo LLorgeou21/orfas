@@ -4,6 +4,7 @@ use crate::boundary::BoundaryConditionResult;
 use crate::material::MaterialLaw;
 use crate::mechanical_state::MechanicalState;
 use crate::mesh::Mesh;
+use crate::material::SimulationContext;
 use crate::solver::{restrict_matrix, restrict_vector, DenseSolver, SolverError};
 
 // ─── Trait ────────────────────────────────────────────────────────────────────
@@ -127,8 +128,9 @@ impl IntegratorMethod for ImplicitEulerIntegrator {
             let u_next_full = bc_result.reconstruct_ref(&u_next_red, n_full);
 
             // Assemble K_tangent and f_int on the full mesh
-            let k_full     = assembler.assemble_tangent::<B>(mesh, material, &u_next_full);
-            let f_int_full = assembler.assemble_internal_forces(mesh, material, &u_next_full);
+            let mut sim_ctx = &SimulationContext::isotropic_static(mesh.elements.len());
+            let k_full     = assembler.assemble_tangent::<B>(mesh, material, &u_next_full,&sim_ctx);
+            let f_int_full = assembler.assemble_internal_forces(mesh, material, &u_next_full,sim_ctx);
 
             // Restrict K_tangent and f_int to free DOFs
             let k_red     = restrict_matrix(&k_full,     &bc_result.free_dofs);
@@ -222,7 +224,8 @@ mod tests {
         // Reference statique via Newton
         let bc_static = make_bc();
         let u_zero = DVector::zeros(3 * mesh.nodes.len());
-        let k_ref = assembler.assemble_tangent::<LinearBMatrix>(&mesh, &mat, &u_zero);
+        let sim_ctx = &SimulationContext::isotropic_static(mesh.elements.len());
+        let k_ref = assembler.assemble_tangent::<LinearBMatrix>(&mesh, &mat, &u_zero,&sim_ctx);
         let bc_result_static = bc_static.apply(&k_ref, mesh.nodes.len());
         let u_static_red = crate::solver::DirectSolver
             .solve(&bc_result_static.k, &bc_result_static.f).unwrap();
@@ -231,7 +234,7 @@ mod tests {
             .map(|&i| u_static[3 * i]).sum::<f64>() / nb_tip;
 
         // Simulation dynamique
-        let k_full = assembler.assemble_tangent::<LinearBMatrix>(&mesh, &mat, &u_zero);
+        let k_full = assembler.assemble_tangent::<LinearBMatrix>(&mesh, &mat, &u_zero,&sim_ctx);
         let mass   = assembler.assemble_mass(&mesh, &mat);
         let damping = RayleighDamping { alpha: 10.0, beta: 0.01 };
         let c_full  = damping.compute(&mass, &k_full);

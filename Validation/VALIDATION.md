@@ -726,3 +726,374 @@ of the isochoric model.
 | `test_nh_matches_svk_small_strain` | NH and SVK agree for small strains | PASS |
 | `test_cvol_correct` | C_vol matches finite differences on S_vol | PASS |
 | All v0.1–v0.6.1 tests | Unchanged | PASS |
+
+## v0.7.1 — Anisotropic fibers, viscoelasticity, and context architecture
+
+**Architecture:** `MaterialContext<'a>` + `SimulationContext`, `FiberField`, `InternalVariables`
+**Anisotropic model:** `HolzapfelOgden` (Holzapfel-Gasser-Ogden)
+**Null anisotropy:** `NoAnisotropy`
+**Viscoelastic model:** `ViscoelasticMaterial<I, A, V>` (Prony series, Holzapfel & Gasser 2001)
+**References:** Cheng & Zhang (2018), Holzapfel & Gasser (2001)
+
+---
+
+### Architecture
+
+#### MaterialContext and SimulationContext
+
+All material law methods now receive a `MaterialContext<'a>` — a lightweight per-element
+stack-allocated struct grouping:
+
+- `dt: f64` — time step (zero for static problems)
+- `fiber_dirs: &'a [Vector3<f64>]` — borrowed fiber directions for this element
+- `iv_ref: Option<&'a ElementInternalVars>` — read-only internal variables (used by `pk2_stress`)
+- `iv: Option<&'a mut ElementInternalVars>` — mutable internal variables (used by `update_state`)
+
+`SimulationContext` owns `FiberField`, `dt`, and `Option<InternalVariables>`. The assembler
+constructs a `MaterialContext` per element via `material_context_for` (read-only) or
+`material_context_for_mut` (mutable). This separation follows the SOFA/FEBio pattern:
+Newton iterations read internal state without modifying it; `update_state` writes once
+per time step after convergence.
+
+#### FiberField
+
+`FiberField` stores fiber directions as `Vec<Vec<Vector3<f64>>>` — one slice per element,
+one `Vector3` per fiber family. Constructed once and stored in `SimulationContext`. The
+assembler borrows the slice for element `i` via `fiber_field.directions_for(i)` — zero
+allocation per call. Constructors: `empty`, `uniform`, `helix`, `helix_two_families`.
+
+#### InternalVariables and ElementInternalVars
+
+`InternalVariables` stores one `ElementInternalVars` per mesh element. Each element holds
+a flat `DVector<f64>` with the following layout for `m_iso` isochoric and `m_aniso`
+anisotropic Prony processes:
+
+```
+[0 .. 6*m_iso]                        Q_iso[0..m_iso]     Isochoric Prony tensors (Voigt)
+[6*m_iso .. 6*(m_iso+m_aniso)]        Q_aniso[0..m_aniso] Anisotropic Prony tensors (Voigt)
+[6*(m_iso+m_aniso) .. +6]             S_iso_prev          Previous isochoric PK2 (Voigt)
+[6*(m_iso+m_aniso)+6 .. +6]           S_aniso_prev        Previous anisotropic PK2 (Voigt)
+[6*(m_iso+m_aniso)+12 .. +6]          sum_Q               Precomputed ΣQ_α (Voigt)
+```
+
+Total: `6*(m_iso + m_aniso + 3)` scalars per element. `sum_Q` is precomputed by
+`update_state` and read in O(1) by `pk2_stress` at every Newton iteration.
+
+---
+
+### Holzapfel-Gasser-Ogden anisotropic model
+
+#### Formulation
+
+`HolzapfelOgden` implements the `AnisotropicPart` trait — the anisotropic isochoric fiber
+contribution only. The ground matrix and volumetric parts are handled by `IsochoricPart`
+and `VolumetricPart` and summed in `CompressibleAnisotropicMaterial<I, A, V>`.
+
+Anisotropic strain energy (Cheng & Zhang eq. 37c):
+```
+W_aniso = k₁/(2k₂) · Σᵢ [ exp(k₂·(Ī₄ᵢ − 1)²) − 1 ]
+```
+
+where `Ī₄ᵢ = J^{-2/3}·(a₀ᵢ·C·a₀ᵢ)` is the modified pseudo-invariant and `a₀ᵢ` is
+the unit fiber direction vector in the reference configuration. Fibers only contribute
+under tension: if `Ī₄ᵢ ≤ 1`, the contribution is set to zero.
+
+PK2 stress (Cheng & Zhang eq. 49):
+```
+S_aniso = 2·J^{-2/3} · Σᵢ dΨ/dĪ₄ᵢ · (A₀ᵢ − 1/3·I₄ᵢ·C⁻¹)
+```
+
+where `A₀ᵢ = a₀ᵢ⊗a₀ᵢ` and `I₄ᵢ = a₀ᵢ·C·a₀ᵢ` (unmodified invariant).
+
+First derivative:
+```
+dΨ/dĪ₄ᵢ = k₁·(Ī₄ᵢ − 1)·exp(k₂·(Ī₄ᵢ − 1)²)   if Ī₄ᵢ > 1, else 0
+```
+
+Tangent stiffness (Cheng & Zhang eq. 56), four terms per fiber family:
+```
+C_aniso = J^{-4/3} · Σᵢ [
+    4·d²Ψ·(A₀ᵢ⊗A₀ᵢ)
+  − 4/3·(Ī₄ᵢ·d²Ψ + dΨ)·(C̄⁻¹⊗A₀ᵢ + A₀ᵢ⊗C̄⁻¹)
+  + 4/9·(Ī₄ᵢ²·d²Ψ + Ī₄ᵢ·dΨ)·(C̄⁻¹⊗C̄⁻¹)
+  + 4/3·Ī₄ᵢ·dΨ·(C̄⁻¹⊙C̄⁻¹)
+]
+```
+
+where `C̄⁻¹ = J^{2/3}·C⁻¹`. Note: the odot coefficient is `2/3` (not `4/3`) because
+`cinv_tangent_voigt` encodes `2×(A⊙A)` in its b-term — see helpers.rs convention.
+
+---
+
+### Test case 1 — HolzapfelOgden: zero energy and stress at F=I
+
+At `F = I`, all modified pseudo-invariants equal 1 (`Ī₄ᵢ = 1`). Since fibers only
+contribute under tension (`Ī₄ᵢ > 1`), all contributions are exactly zero.
+
+| Quantity | Value | Status |
+|----------|-------|--------|
+| `W_aniso(F=I)` | < 1×10⁻¹⁰ | PASS |
+| `‖S_aniso(F=I)‖` | < 1×10⁻¹⁰ | PASS |
+
+### Test case 2 — HolzapfelOgden: zero contribution under fiber compression
+
+With `F` compressing along the fiber direction (`F[0,0] = 0.8`, fiber = `[1,0,0]`),
+`Ī₄ < 1` and the fiber contribution must vanish exactly.
+
+| Quantity | Value | Status |
+|----------|-------|--------|
+| `‖S_aniso(F_compress)‖` | < 1×10⁻¹⁰ | PASS |
+
+### Test case 3 — HolzapfelOgden: numerical tangent consistency
+
+The analytical `C_aniso` is verified against central finite differences on `S_aniso(E)`
+at a moderate deformation with active fiber tension (`Ī₄ > 1`). Symmetric Cholesky
+perturbations are used. Relative error per column: `‖dS_ana − dS_FD‖ / ‖dS_FD‖`.
+
+| Quantity | Value | Status |
+|----------|-------|--------|
+| Max relative error over all 6 columns | < 5×10⁻² | PASS |
+
+Note: the 5×10⁻² tolerance (vs 1×10⁻³ for isotropic models) reflects the exponential
+nonlinearity of the HGO energy — central differences are less accurate near exponential
+terms. The tangent is verified against an independent analytical derivation.
+
+### Test case 4 — HGO full material: standard suite at F=I
+
+`CompressibleAnisotropicMaterial<NeoHookeanIso, HolzapfelOgden, VolumetricLnJ>` with
+`MaterialContext::default()` (empty fiber dirs): fibers are inactive, so the standard
+isotropic suite must pass with effective parameters `λ, μ` from the ground matrix.
+
+| Test | Value | Status |
+|------|-------|--------|
+| `W(F=I)` | < 1×10⁻¹⁰ | PASS |
+| `‖S(F=I)‖` | < 1×10⁻¹⁰ | PASS |
+| `‖C(F=I) − C_Hooke‖` | < 1×10⁻⁶ | PASS |
+| Tangent symmetry at arbitrary F | < 1×10⁻¹⁰ | PASS |
+| FD tangent consistency | < 1×10⁻³ | PASS |
+| Small strain convergence to linear | < 1×10⁻³ | PASS |
+
+### Test case 5 — FiberField: helix angle validation
+
+`FiberField::helix(n, axis, up, angle_deg)` produces fiber directions at the specified
+helix angle. Two geometric boundary conditions are verified:
+
+| Test | Description | Status |
+|------|-------------|--------|
+| angle = 0° | Fiber direction aligns with axis | PASS |
+| angle = 90° | Fiber direction is perpendicular to axis | PASS |
+
+---
+
+### ViscoelasticMaterial — Prony series formulation
+
+#### Algorithmic update (Holzapfel & Gasser 2001, Box 1)
+
+The viscoelastic material wraps any `CompressibleMaterial` or `CompressibleAnisotropicMaterial`
+and adds Prony series dissipation on the isochoric and anisotropic contributions. The
+volumetric part remains purely elastic.
+
+**Parameters per contribution** (iso and aniso independently):
+- `τ_α` — relaxation times (seconds)
+- `β_α` — free-energy factors (dimensionless, Prony series)
+
+**Algorithmic quantities:**
+```
+δ_αa = β_αa · exp(−Δt / 2·τ_αa)                   (per-process factor)
+δ_a  = Σ_α δ_αa                                      (total scaling factor)
+```
+
+**Internal variable update (called once per time step after Newton convergence):**
+```
+H_α,n   = exp(−Δt/τ)·Q_α,n − δ_αa·S_iso,n^∞         (history term)
+Q_α,n+1 = H_α,n + δ_αa·S_iso,n+1^∞                   (updated Prony tensor)
+sum_Q   = Σ_α Q_α,n+1   (iso + aniso combined, precomputed for O(1) reads)
+```
+
+**Algorithmic PK2 stress (read-only, every Newton iteration):**
+```
+S_n+1 = S_iso^∞ + S_aniso^∞ + S_vol^∞ + sum_Q
+```
+
+`pk2_stress` reads `sum_Q` from `iv_ref` in O(1) — no Prony loop at query time.
+This is the critical performance property for large meshes with many Newton iterations.
+
+**Algorithmic tangent stiffness:**
+```
+C_n+1 = C_vol^∞ + (1 + δ_iso)·C_iso^∞ + (1 + δ_aniso)·C_aniso^∞
+```
+
+The tangent is evaluated with `dt > 0` and scales the isochoric and anisotropic
+contributions by `(1 + δ_a)`. The volumetric contribution is unscaled.
+
+#### SOFA/FEBio pattern
+
+Following the established pattern in SOFA and FEBio:
+- During Newton iterations: `assemble_internal_forces` calls `pk2_stress` with `iv_ref` —
+  reads `sum_Q` from the previous time step without modification
+- After Newton convergence: `assembler.update_internal_variables` calls `update_state`
+  for each element — computes and stores `Q_α,n+1` and `sum_Q`
+
+This ensures internal variables are updated exactly once per time step, regardless of
+the number of Newton iterations required for convergence.
+
+---
+
+### Test case 6 — ViscoelasticMaterial: elastic fallback at F=I
+
+Without `iv` (`MaterialContext::default()`), `pk2_stress` returns the elastic equilibrium
+stress only. At `F = I`, this must be zero.
+
+| Quantity | Value | Status |
+|----------|-------|--------|
+| `‖S(F=I, no iv)‖` | < 1×10⁻¹⁰ | PASS |
+
+### Test case 7 — ViscoelasticMaterial: zero stress at F=I with iv initialized
+
+With `iv` initialized to zero and `dt = 0.1`, `pk2_stress` at `F = I` must still be zero
+since `sum_Q = 0` and `S_eq = 0` at the reference configuration.
+
+| Quantity | Value | Status |
+|----------|-------|--------|
+| `‖S(F=I, iv=zeros)‖` | < 1×10⁻¹⁰ | PASS |
+
+### Test case 8 — ViscoelasticMaterial: relaxation under constant deformation
+
+Under constant deformation `F = I + e0` (moderate strain), the stress must converge toward
+the elastic equilibrium stress `S_eq = S_iso^∞ + S_aniso^∞ + S_vol^∞` after many time steps.
+200 steps at `dt = 0.05 s` cover approximately `10·τ_min` relaxation times.
+
+At convergence: `Q_α → 0` because `S_iso^∞` does not change, so `H_α → 0` and
+`Q_α,n+1 → δ·S^∞ − δ·S^∞ = 0`.
+
+**NH isotropic** (`τ = 1.0 s`, `β = 0.3`):
+
+| Quantity | Value | Status |
+|----------|-------|--------|
+| `‖S_last − S_eq‖ / ‖S_eq‖` | < 1×10⁻² | PASS |
+
+**HGO anisotropic** (`τ_iso = 1.0 s`, `β_iso = 0.3`, `τ_aniso = 0.5 s`, `β_aniso = 0.2`):
+
+| Quantity | Value | Status |
+|----------|-------|--------|
+| `‖S_last − S_eq‖ / ‖S_eq‖` | < 1×10⁻² | PASS |
+
+### Test case 9 — ViscoelasticMaterial: standard elastic suite
+
+`ViscoelasticMaterial<NeoHookeanIso, NoAnisotropy, VolumetricLnJ>` with
+`MaterialContext::default()` must pass the full standard material suite — the viscoelastic
+wrapper must not alter elastic behavior when `iv = None` and `dt = 0`.
+
+| Test | Value | Status |
+|------|-------|--------|
+| `W(F=I)` | < 1×10⁻¹⁰ | PASS |
+| `‖S(F=I)‖` | < 1×10⁻¹⁰ | PASS |
+| `‖C(F=I) − C_Hooke‖` | < 1×10⁻⁶ | PASS |
+| FD tangent consistency | < 1×10⁻³ | PASS |
+| Small strain convergence | < 1×10⁻³ | PASS |
+
+### Test case 10 — Algorithmic tangent scaling
+
+The algorithmic tangent `C_algo = C_vol + (1+δ_iso)·C_iso + (1+δ_aniso)·C_aniso`
+must differ from the elastic tangent `C_el = C_vol + C_iso + C_aniso` by exactly
+`δ_iso·C_iso` (for isotropic materials without aniso). Verified analytically:
+
+```
+C_algo − C_el = δ_iso · C_iso
+where C_iso = C_el − C_vol
+```
+
+| Quantity | Value | Status |
+|----------|-------|--------|
+| `‖(C_algo − C_el) − δ_iso·C_iso‖ / ‖C_iso‖` | < 1×10⁻⁶ | PASS |
+| `δ_iso = β·exp(−dt/2τ) = 0.3·exp(−0.05)` | 0.285369 | — |
+| Ratio `‖C_algo − C_el‖ / ‖C_iso‖` | 0.285369 | PASS |
+
+Note: the ratio `C_algo[0,0] / C_el[0,0]` does not equal `(1 + δ_iso)` because `C_vol[0,0]`
+is not scaled — only the isochoric contribution is scaled. The correct verification is on
+the difference `C_algo − C_el`, not on the ratio of total tangents.
+
+### Test case 11 — NoAnisotropy: zero contribution
+
+`NoAnisotropy` must return exactly zero for all three `AnisotropicPart` methods at any F.
+This is verified implicitly via `test_hgo_full_standard_suite` (empty fiber dirs activate
+the zero path) and explicitly in `test_nh_viscoelastic_standard_suite`.
+
+| Quantity | Value | Status |
+|----------|-------|--------|
+| `W_aniso(F)` | 0.0 exactly | PASS |
+| `‖S_aniso(F)‖` | 0.0 exactly | PASS |
+| `‖C_aniso(F)‖` | 0.0 exactly | PASS |
+
+---
+
+### Test case 12 — Integration test: viscoelastic relaxation in full pipeline
+
+A prismatic bar (`nx=3, ny=nz=2`, `L=2`) is held at a constant small axial displacement
+(`u[tip] = 1×10⁻³`). The reaction force is measured over 200 time steps at `dt = 0.05 s`
+using `assemble_internal_forces` + `update_internal_variables`. The material is
+`ViscoelasticMaterial<NeoHookeanIso, NoAnisotropy, VolumetricLnJ>` with `τ = 1.0 s`,
+`β = 0.3`.
+
+This test validates the full pipeline: `SimulationContext` with `InternalVariables`,
+`material_context_for` passing `iv_ref`, `pk2_stress` reading `sum_Q`, and
+`update_internal_variables` calling `update_state` after each step.
+
+Expected behavior: at step 0, `sum_Q = 0` so `f_int = f_elastic`. After ~10τ steps,
+`Q_α → 0` and `f_int → f_elastic` again (full relaxation).
+
+| Step | f_int norm | Description |
+|------|------------|-------------|
+| 0 | 0.942112 | sum_Q = 0, equals elastic |
+| 50 | 0.953515 | peak viscoelastic overshoot |
+| 100 | 0.943047 | decaying toward elastic |
+| 150 | 0.942189 | near elastic equilibrium |
+| 200 | 0.942119 | converged |
+
+| Quantity | Value | Status |
+|----------|-------|--------|
+| `‖f_int_final − f_elastic‖ / ‖f_elastic‖` | 7.0×10⁻⁶ | PASS |
+
+---
+
+### Assembler refactoring
+
+`assembler.rs` was split into four focused modules:
+
+| Module | Content |
+|--------|---------|
+| `assembler/mod.rs` | `Assembler` struct, `new`, `assemble_mass`, re-exports |
+| `assembler/geometry.rs` | `tetra_volume`, `tetra_bcd`, `tetra_b_matrix`, `compute_deformation_gradient`, `ElementGeometry`, `BMatrix`, `LinearBMatrix` |
+| `assembler/pattern.rs` | `build_csr_pattern`, `build_element_colors` |
+| `assembler/assembly.rs` | `assemble_tangent`, `assemble_tangent_sparse`, `assemble_tangent_sparse_parallel`, `assemble_internal_forces`, `update_internal_variables` |
+
+All existing assembly tests pass unchanged after the split.
+
+### Test suite refactoring
+
+`material/tests.rs` was split into a `tests/` subdirectory:
+
+| File | Content |
+|------|---------|
+| `tests/mod.rs` | Module declarations |
+| `tests/helpers.rs` | `run_standard_material_tests`, `run_numerical_tangent_check`, `run_anisotropic_part_tests`, `run_viscoelastic_tests` |
+| `tests/elastic.rs` | SVK, NH, MR, Ogden parametric tests and constructor validation |
+| `tests/anisotropic.rs` | HGO tests |
+| `tests/viscoelastic.rs` | `ViscoelasticMaterial` tests |
+
+---
+
+### Summary
+
+| Test | Description | Status |
+|------|-------------|--------|
+| `test_holzapfel_ogden_aniso_suite` | W=0, S=0 at F=I; zero under compression; FD tangent consistency | PASS |
+| `test_hgo_full_standard_suite` | Full standard material suite for CompressibleAnisotropicMaterial | PASS |
+| `test_helix_two_families_angle_zero_aligns_with_axis` | FiberField helix angle=0° aligns with axis | PASS |
+| `test_helix_two_families_angle_90_perpendicular_to_axis` | FiberField helix angle=90° perpendicular | PASS |
+| `test_nh_viscoelastic_suite` | Elastic fallback, zero at F=I, relaxation, tangent scaling | PASS |
+| `test_hgo_viscoelastic_suite` | Same suite for HGO viscoelastic | PASS |
+| `test_nh_viscoelastic_standard_suite` | Standard material suite passes for viscoelastic material | PASS |
+| `test_viscoelastic_relaxation` | Full pipeline integration test: relaxation to elastic equilibrium | PASS |
+| All v0.1–v0.7.0 tests | Unchanged | PASS |
+| **Total** | **54 tests** | **54 PASS / 0 FAIL** |

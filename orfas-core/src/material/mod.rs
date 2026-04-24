@@ -3,11 +3,16 @@
 // Re-exports all public types and helpers. External code only needs to import from here.
 
 mod traits;
-mod helpers;
+pub mod helpers;
 mod volumetric;
 mod compressible;
 mod svk;
 pub mod isochoric;
+pub mod fiber_fields;
+pub mod context;
+pub mod anisotropic;
+pub mod internal_variables;
+pub mod viscoelastic;
 
 #[cfg(test)]
 mod tests;
@@ -17,6 +22,11 @@ mod tests;
 pub use traits::{MaterialLaw, IsochoricPart, VolumetricPart};
 pub use helpers::{lame, hooke_voigt};
 pub use volumetric::{VolumetricLnJ, VolumetricQuad};
-pub use compressible::CompressibleMaterial;
+pub use compressible::{CompressibleMaterial,CompressibleAnisotropicMaterial};
 pub use svk::SaintVenantKirchhoff;
 pub use isochoric::{NeoHookeanIso, MooneyRivlinIso, OgdenIso};
+pub use anisotropic::holzapfel_ogden::HolzapfelOgden;
+pub use context::{MaterialContext, SimulationContext};
+pub use internal_variables::{InternalVariables, ElementInternalVars};
+pub use anisotropic::NoAnisotropy;
+pub use viscoelastic::ViscoelasticMaterial;

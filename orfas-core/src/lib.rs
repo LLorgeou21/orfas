@@ -21,6 +21,7 @@ mod integration_tests {
     use crate::damping::{DampingModel, RayleighDamping};
     use crate::integrator::{ImplicitEulerIntegrator, IntegratorMethod};
     use crate::mechanical_state::MechanicalState;
+    use crate::material::SimulationContext;
     use nalgebra::{DMatrix, DVector, Vector3};
 
     // ─── Helpers ──────────────────────────────────────────────────────────────
@@ -60,7 +61,8 @@ mod integration_tests {
         let material = svk(1000.0, 0.3, 1.0);
         let assembler = Assembler::new(&mesh);
         let u_zero = DVector::zeros(3 * mesh.nodes.len());
-        let k = assembler.assemble_tangent::<LinearBMatrix>(&mesh, &material, &u_zero);
+        let sim_ctx = &SimulationContext::isotropic_static(mesh.elements.len());
+        let k = assembler.assemble_tangent::<LinearBMatrix>(&mesh, &material, &u_zero,&sim_ctx);
 
         let constraint = Constraint {
             list: vec![
@@ -92,7 +94,8 @@ mod integration_tests {
         let f_total = 100.0;
 
         let u_zero = DVector::zeros(3 * mesh.nodes.len());
-        let k = assembler.assemble_tangent::<LinearBMatrix>(&mesh, &material, &u_zero);
+        let sim_ctx = &SimulationContext::isotropic_static(mesh.elements.len());
+        let k = assembler.assemble_tangent::<LinearBMatrix>(&mesh, &material, &u_zero,&sim_ctx);
         let bc = make_bc(nx, ny, nz, &tips,
             Vector3::new(f_total / nb_tip, 0.0, 0.0),
             Box::new(PenaltyMethod));
@@ -137,7 +140,8 @@ mod integration_tests {
             let nb_tip = tips.len() as f64;
 
             let u_zero = DVector::zeros(3 * mesh.nodes.len());
-            let k = assembler.assemble_tangent::<LinearBMatrix>(&mesh, &material, &u_zero);
+            let sim_ctx = &SimulationContext::isotropic_static(mesh.elements.len());
+            let k = assembler.assemble_tangent::<LinearBMatrix>(&mesh, &material, &u_zero,&sim_ctx);
             let bc = make_bc(nx, ny, nz, &tips,
                 Vector3::new(0.0, -f_total / nb_tip, 0.0),
                 Box::new(PenaltyMethod));
@@ -183,7 +187,8 @@ mod integration_tests {
         let material = svk(1e6, 0.3, 1000.0);
         let assembler = Assembler::new(&mesh);
         let u_zero = DVector::zeros(3 * mesh.nodes.len());
-        let k = assembler.assemble_tangent::<LinearBMatrix>(&mesh, &material, &u_zero);
+        let sim_ctx = &SimulationContext::isotropic_static(mesh.elements.len());
+        let k = assembler.assemble_tangent::<LinearBMatrix>(&mesh, &material, &u_zero,&sim_ctx);
         let mass = assembler.assemble_mass(&mesh, &material);
         let c = RayleighDamping { alpha: 0.1, beta: 0.01 }.compute(&mass, &k);
         let diff = (&c - c.transpose()).abs().max();
@@ -205,7 +210,8 @@ mod integration_tests {
         let f_total = 100.0;
 
         let u_zero = DVector::zeros(3 * mesh.nodes.len());
-        let k = assembler.assemble_tangent::<LinearBMatrix>(&mesh, &material, &u_zero);
+        let mut sim_ctx = &SimulationContext::isotropic_static(mesh.elements.len());
+        let k = assembler.assemble_tangent::<LinearBMatrix>(&mesh, &material, &u_zero,&sim_ctx);
 
         let bc = make_bc(nx, ny, nz, &tips,
             Vector3::new(f_total / nb_tip, 0.0, 0.0),
@@ -216,12 +222,12 @@ mod integration_tests {
 
         let newton = NewtonRaphson::default();
         let u_newton_red = newton.solve::<LinearBMatrix>(
-            &assembler, &mesh, &material, &bc_result, &DirectSolver,
+            &assembler, &mesh, &material, &bc_result, &DirectSolver,&sim_ctx
         ).unwrap();
 
         // Verifier que f_int(u) ~ f_ext
         let u_full = bc_result.reconstruct_ref(&u_newton_red, n_full);
-        let f_int_full = assembler.assemble_internal_forces(&mesh, &material, &u_full);
+        let f_int_full = assembler.assemble_internal_forces(&mesh, &material, &u_full,&mut sim_ctx);
         let f_int_red = crate::solver::restrict_vector(&f_int_full, &bc_result.free_dofs);
         let residual_norm = (&f_int_red - &f_ext).norm() / f_ext.norm();
         println!("Newton residual | {:.2e}", residual_norm);
@@ -243,7 +249,8 @@ mod integration_tests {
         let f_total = 100.0;
 
         let u_zero = DVector::zeros(3 * mesh.nodes.len());
-        let k_full = assembler.assemble_tangent::<LinearBMatrix>(&mesh, &material, &u_zero);
+        let sim_ctx = &SimulationContext::isotropic_static(mesh.elements.len());
+        let k_full = assembler.assemble_tangent::<LinearBMatrix>(&mesh, &material, &u_zero,&sim_ctx);
         let mass = assembler.assemble_mass(&mesh, &material);
 
         // Solution statique de reference
@@ -327,7 +334,8 @@ mod integration_tests {
         // Force tres petite -> petites deformations -> SVK == lineaire
         let f_small = 1e-3;
         let u_zero = DVector::zeros(3 * mesh.nodes.len());
-        let k = assembler.assemble_tangent::<LinearBMatrix>(&mesh, &material, &u_zero);
+        let sim_ctx = &SimulationContext::isotropic_static(mesh.elements.len());
+        let k = assembler.assemble_tangent::<LinearBMatrix>(&mesh, &material, &u_zero,&sim_ctx);
 
         let bc = make_bc(nx, ny, nz, &tips,
             Vector3::new(f_small / nb_tip, 0.0, 0.0),
@@ -345,7 +353,7 @@ mod integration_tests {
         let bc_result2 = bc2.apply(&k, mesh.nodes.len());
         let newton = NewtonRaphson::default();
         let u_svk_red = newton.solve::<LinearBMatrix>(
-            &assembler, &mesh, &material, &bc_result2, &DirectSolver,
+            &assembler, &mesh, &material, &bc_result2, &DirectSolver,&sim_ctx
         ).unwrap();
         let u_svk = bc_result2.reconstruct(u_svk_red);
 
@@ -353,4 +361,82 @@ mod integration_tests {
         println!("SVK vs lineaire (petites def) | error = {:.2e}", error);
         assert!(error < 1e-6, "SVK doit etre identique au lineaire en petites def : {:.2e}", error);
     }
+
+    // ─── Viscoelastic relaxation ──────────────────────────────────────────────
+
+    /// Under constant displacement, the reaction force must relax toward
+    /// the elastic equilibrium force after many time steps.
+    /// Verifies the full pipeline: assembler + update_internal_variables.
+    #[test]
+    fn test_viscoelastic_relaxation() {
+        use crate::material::{
+            NeoHookeanIso, VolumetricLnJ, NoAnisotropy,
+            ViscoelasticMaterial, InternalVariables, SimulationContext,
+        };
+        use crate::material::helpers::lame;
+
+        let nx = 3; let ny = 2; let nz = 2;
+        let mesh      = Assembler::new(&Mesh::generate(nx, ny, nz, 1.0, 1.0, 1.0));
+        let mesh_ref  = Mesh::generate(nx, ny, nz, 1.0, 1.0, 1.0);
+        let assembler = Assembler::new(&mesh_ref);
+
+        let (lambda, mu) = lame(1000.0, 0.3);
+        let kappa = lambda + 2.0 / 3.0 * mu;
+        let material = ViscoelasticMaterial {
+            iso:        NeoHookeanIso { mu },
+            aniso:      NoAnisotropy,
+            vol:        VolumetricLnJ { kappa },
+            density:    1000.0,
+            tau_iso:    vec![1.0],
+            beta_iso:   vec![0.3],
+            tau_aniso:  vec![],
+            beta_aniso: vec![],
+        };
+
+        let n_elements = mesh_ref.elements.len();
+        let n_nodes    = mesh_ref.nodes.len();
+
+        // Small constant displacement — applied once, held fixed
+        let mut u = DVector::zeros(3 * n_nodes);
+        u[3 * (nx - 1)] = 1e-3; // small axial displacement on tip node
+
+        // Elastic equilibrium force — no iv
+        let f_int_elastic = {
+            let mut sim_ctx = SimulationContext::isotropic_static(n_elements);
+            assembler.assemble_internal_forces(&mesh_ref, &material, &u, &mut sim_ctx)
+        };
+        let f_elastic_norm = f_int_elastic.norm();
+        println!("f_elastic norm = {:.6}", f_elastic_norm);
+
+        // Viscoelastic simulation — hold u fixed, run many steps
+        let dt        = 0.05;
+        let n_steps   = 200;
+        let iv        = InternalVariables::new(n_elements, material.m_iso(), material.m_aniso());
+        let mut sim_ctx = SimulationContext::viscoelastic(
+            crate::material::fiber_fields::FiberField::empty(n_elements),
+            dt,
+            iv,
+        );
+
+        let mut f_last_norm = 0.0;
+        for step in 0..n_steps {
+            let f_int = assembler.assemble_internal_forces(&mesh_ref, &material, &u, &mut sim_ctx);
+            f_last_norm = f_int.norm();
+            assembler.update_internal_variables(&mesh_ref, &material, &u, &mut sim_ctx);
+
+            if step % 50 == 0 {
+                println!("step {:3} | f_int norm = {:.6}", step, f_last_norm);
+            }
+        }
+
+        println!("f_elastic norm = {:.6}", f_elastic_norm);
+        println!("f_last norm    = {:.6}", f_last_norm);
+
+        // After many steps, f_int must converge toward f_elastic (S_eq)
+        let rel_err = (f_last_norm - f_elastic_norm).abs() / f_elastic_norm.max(1e-14);
+        println!("rel_err = {:.4e}", rel_err);
+        assert!(rel_err < 0.01,
+            "Viscoelastic f_int must converge to elastic equilibrium, rel_err = {:.4e}", rel_err);
+    }
+
 }

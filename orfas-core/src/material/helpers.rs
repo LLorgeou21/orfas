@@ -112,7 +112,7 @@ pub(super) fn i_odot_i_voigt() -> Matrix6<f64> {
 /// Build (A tensor B + B tensor A) in Voigt notation (6x6).
 ///
 /// (A tensor B)_IJKL = A_IJ * B_KL
-pub(super) fn a_tensor_b_plus_b_tensor_a(
+pub(crate) fn a_tensor_b_plus_b_tensor_a(
     a_mat: &Matrix3<f64>,
     b_mat: &Matrix3<f64>,
 ) -> Matrix6<f64> {
@@ -148,4 +148,40 @@ pub(super) fn a_odot_i_voigt(a_mat: &Matrix3<f64>) -> Matrix6<f64> {
         }
     }
     out
+}
+
+/// Build (A tensor A) in Voigt notation (6x6) for a symmetric second-order tensor A.
+///
+/// (A tensor A)_IJKL = A_IJ * A_KL
+///
+/// Used for the anisotropic fiber tangent term:
+///   4 * d2W * (A0i tensor A0i)
+/// where A0i = a0i outer a0i is the structural tensor of fiber family i.
+pub(crate) fn a_tensor_a_voigt(a_mat: &Matrix3<f64>) -> Matrix6<f64> {
+    let idx = [(0usize, 0usize), (1,1), (2,2), (0,1), (1,2), (0,2)];
+    let mut out = Matrix6::zeros();
+    for i in 0..6 {
+        for j in 0..6 {
+            let (p, q) = idx[i];
+            let (r, s) = idx[j];
+            // Factor 0.5 for shear columns (engineering shear convention)
+            let col_factor = if r == s { 1.0 } else { 2.0 };
+            out[(i, j)] = a_mat[(p, q)] * a_mat[(r, s)] / col_factor;
+        }
+    }
+    out
+}
+
+/// Convert a symmetric Matrix3 to Voigt notation [11,22,33,12,23,13] — ORFAS convention.
+pub(crate) fn mat3_to_voigt(s: &Matrix3<f64>) -> [f64; 6] {
+    [s[(0,0)], s[(1,1)], s[(2,2)], s[(0,1)], s[(1,2)], s[(0,2)]]
+}
+
+/// Convert a Voigt slice [11,22,33,12,23,13] to a symmetric Matrix3 — ORFAS convention.
+pub(crate) fn voigt_to_mat3(v: &[f64]) -> Matrix3<f64> {
+    Matrix3::new(
+        v[0], v[3], v[5],
+        v[3], v[1], v[4],
+        v[5], v[4], v[2],
+    )
 }

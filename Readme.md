@@ -26,8 +26,9 @@ without modifying the core), and **performance** (Rust's ownership model and zer
 enable safe, high-performance numerical computation without a garbage collector).
 
 This project is in active early development. The current milestone targets a dynamic 3D FEM solver
-with nonlinear hyperelastic materials on tetrahedral meshes and implicit Euler time integration with
-Newton-Raphson. Contributions, feedback, and collaborations are warmly welcomed.
+with nonlinear hyperelastic materials on tetrahedral meshes, fiber-reinforced anisotropic models,
+viscoelastic dissipation via Prony series, and implicit Euler time integration with Newton-Raphson.
+Contributions, feedback, and collaborations are warmly welcomed.
 
 ---
 
@@ -96,9 +97,10 @@ orfas-viewer/src/
 The framework is built around several central traits:
 
 **`MaterialLaw`** — Defines the constitutive relationship between strain and stress in the Lagrangian
-frame. Any hyperelastic material model implements this trait via three methods: `pk2_stress(F)`,
-`tangent_stiffness(F)`, and `strain_energy(F)`. Swapping material laws requires no changes to the
-assembly or solver.
+frame. Any hyperelastic material model implements this trait via four methods: `pk2_stress(F, ctx)`,
+`tangent_stiffness(F, ctx)`, `strain_energy(F, ctx)`, and `update_state(F, ctx)`. All methods take
+a `MaterialContext` grouping fiber directions, time step, and internal variables. Swapping material
+laws requires no changes to the assembly or solver.
 
 **`IsochoricPart`** — Defines the isochoric (volume-preserving) contribution of a hyperelastic
 material. Implemented by `NeoHookeanIso`, `MooneyRivlinIso`, and `OgdenIso`. Each provides
@@ -108,10 +110,45 @@ material. Implemented by `NeoHookeanIso`, `MooneyRivlinIso`, and `OgdenIso`. Eac
 Implemented by `VolumetricLnJ` (W = κ/2·(ln J)²) and `VolumetricQuad` (W = κ/2·(J−1)²).
 Each provides `dw_vol(J)` and `d2w_vol(J)`.
 
+**`AnisotropicPart`** — Defines the anisotropic fiber contribution of a hyperelastic material.
+Implemented by `HolzapfelOgden` and `NoAnisotropy` (zero contribution, zero runtime cost).
+Each provides `strain_energy_aniso(F, ctx)`, `pk2_stress_aniso(F, ctx)`, and `tangent_aniso(F, ctx)`.
+Fiber directions are passed via `MaterialContext` — stored globally in `FiberField` and borrowed
+per element at assembly time.
+
 **`CompressibleMaterial<I, V>`** — Generic struct composing any `IsochoricPart` and `VolumetricPart`
 into a full `MaterialLaw`. The isochoric/volumetric split follows the Flory decomposition and enables
-the same volumetric penalty to be reused across all isochoric models. The total stress and tangent
-are assembled as `S = S_iso + S_vol` and `C = C_iso + C_vol`.
+the same volumetric penalty to be reused across all isochoric models.
+
+**`CompressibleAnisotropicMaterial<I, A, V>`** — Generic struct composing any `IsochoricPart`,
+`AnisotropicPart`, and `VolumetricPart` into a full `MaterialLaw`. Natural extension of
+`CompressibleMaterial` for fiber-reinforced biological tissues.
+
+**`ViscoelasticMaterial<I, A, V>`** — Generic viscoelastic wrapper using a Prony series on the
+isochoric and anisotropic contributions. The volumetric part remains purely elastic. Implements
+the algorithmic update from Holzapfel & Gasser (2001), Box 1. Internal variables (Prony tensors
+Q_α, previous stresses, precomputed ΣQ) are stored per element in `InternalVariables`.
+`pk2_stress` reads ΣQ in O(1); `update_state` performs the full Prony update once per time step
+after Newton convergence — following the SOFA/FEBio pattern.
+
+**`MaterialContext<'a>`** — Per-element evaluation context passed to all material law methods.
+Lightweight stack-allocated struct borrowing from `SimulationContext`. Contains: time step `dt`,
+fiber directions `fiber_dirs` (borrowed from `FiberField`), read-only internal variables `iv_ref`
+(used by `pk2_stress`), and mutable internal variables `iv` (used by `update_state`).
+
+**`SimulationContext`** — Global owned context for a simulation step. Holds `FiberField`, `dt`,
+and `Option<InternalVariables>`. The assembler constructs a `MaterialContext` per element via
+`material_context_for` (read-only) or `material_context_for_mut` (mutable). Extensible — future
+fields (temperature, damage) are added here without changing assembler signatures.
+
+**`FiberField`** — Per-element fiber direction storage. Constructed once (`uniform`, `helix`,
+`helix_two_families`) and stored in `SimulationContext`. The assembler borrows slices per element
+at assembly time — zero allocation per call.
+
+**`InternalVariables`** / **`ElementInternalVars`** — Per-element internal variable storage for
+viscoelastic materials. Layout per element: `[Q_iso × m_iso][Q_aniso × m_aniso][S_iso_prev][S_aniso_prev][sum_Q]`,
+total `6*(m_iso + m_aniso + 3)` scalars. `sum_Q` is precomputed by `update_state` and read in O(1)
+by `pk2_stress` at every Newton iteration.
 
 **`BoundaryConditionMethod`** — Defines how Dirichlet boundary conditions are applied to the system.
 Current implementations: penalty method and elimination method.
@@ -141,7 +178,8 @@ Exposes vector operations (`v_op`, `add_mv`) inspired by SOFA's `MechanicalState
 ### Material library
 
 ORFAS implements a growing library of hyperelastic material laws, all based on the isochoric/volumetric
-split architecture. Every isochoric model is independently composable with any volumetric penalty.
+split architecture. Every isochoric model is independently composable with any volumetric penalty,
+and any combination can be wrapped in `ViscoelasticMaterial` for time-dependent dissipation.
 
 | Model | Type | Energy function |
 |-------|------|-----------------|
@@ -149,25 +187,28 @@ split architecture. Every isochoric model is independently composable with any v
 | `NeoHookeanIso` | Isochoric | W = μ/2·(Ī₁ − 3) |
 | `MooneyRivlinIso` | Isochoric | W = c₁·(Ī₁ − 3) + c₂·(Ī₂ − 3) |
 | `OgdenIso` | Isochoric | W = Σᵢ μᵢ/αᵢ·(λ̄₁^αᵢ + λ̄₂^αᵢ + λ̄₃^αᵢ − 3) |
+| `HolzapfelOgden` | Anisotropic | W = k₁/(2k₂)·Σᵢ[exp(k₂·(Ī₄ᵢ−1)²)−1] |
+| `NoAnisotropy` | Anisotropic | W = 0 (zero-cost null implementation) |
 | `VolumetricLnJ` | Volumetric | U = κ/2·(ln J)² |
 | `VolumetricQuad` | Volumetric | U = κ/2·(J − 1)² |
+| `ViscoelasticMaterial<I,A,V>` | Viscoelastic wrapper | S = S_eq + ΣQ_α (Prony series) |
 
 The `OgdenIso` tangent stiffness is derived from the spectral decomposition of C and implemented
 following Connolly et al. (2019), with L'Hôpital's rule applied when principal stretches are
-numerically equal or similar (tolerance 10⁻⁶). The `NeoHookeanIso` and `MooneyRivlinIso` tangent
-stiffness tensors are derived analytically following Cheng & Zhang (2018).
+numerically equal or similar (tolerance 10⁻⁶). The `NeoHookeanIso`, `MooneyRivlinIso`, and
+`HolzapfelOgden` tangent stiffness tensors are derived analytically following Cheng & Zhang (2018).
+The `ViscoelasticMaterial` algorithmic tangent follows Holzapfel & Gasser (2001), Box 1.
 
 ---
 
 ## How to add a material
 
-ORFAS supports two ways to implement a new hyperelastic material law.
+ORFAS supports several ways to implement a new hyperelastic material law.
 
 ### Option A — Isochoric model (recommended)
 
 If your model admits an isochoric/volumetric split, implement the `IsochoricPart` trait and
-compose it with an existing `VolumetricPart` via `CompressibleMaterial`. This is the approach
-used by `NeoHookeanIso`, `MooneyRivlinIso`, and `OgdenIso`.
+compose it with an existing `VolumetricPart` via `CompressibleMaterial`.
 
 ```rust
 use nalgebra::{Matrix3, Matrix6};
@@ -178,20 +219,9 @@ pub struct MyIso {
 }
 
 impl IsochoricPart for MyIso {
-    fn strain_energy_iso(&self, f: &Matrix3<f64>) -> f64 {
-        // W_iso(F)
-        todo!()
-    }
-
-    fn pk2_stress_iso(&self, f: &Matrix3<f64>) -> Matrix3<f64> {
-        // S_iso = 2 * dW_iso/dC
-        todo!()
-    }
-
-    fn tangent_iso(&self, f: &Matrix3<f64>) -> Matrix6<f64> {
-        // C_iso = 2 * dS_iso/dC
-        todo!()
-    }
+    fn strain_energy_iso(&self, f: &Matrix3<f64>) -> f64 { todo!() }
+    fn pk2_stress_iso(&self, f: &Matrix3<f64>) -> Matrix3<f64> { todo!() }
+    fn tangent_iso(&self, f: &Matrix3<f64>) -> Matrix6<f64> { todo!() }
 }
 ```
 
@@ -205,46 +235,153 @@ let mat = CompressibleMaterial {
 };
 ```
 
-`CompressibleMaterial<MyIso, VolumetricLnJ>` automatically implements `MaterialLaw` — no further
-changes needed. The material is immediately usable with any solver and assembler in ORFAS.
+### Option B — Anisotropic model
 
-### Option B — Fully coupled model
+If your model has fiber reinforcement, implement `AnisotropicPart` and compose it via
+`CompressibleAnisotropicMaterial`. Fiber directions are passed via `MaterialContext` — no
+changes to the assembler are needed.
 
-If your model does not admit an isochoric/volumetric split (e.g. Saint Venant-Kirchhoff, or a
-model with coupled invariants), implement `MaterialLaw` directly:
+```rust
+use orfas_core::material::{
+    AnisotropicPart, CompressibleAnisotropicMaterial,
+    NeoHookeanIso, VolumetricLnJ, MaterialContext,
+};
+
+pub struct MyFibers { pub k1: f64, pub k2: f64 }
+
+impl AnisotropicPart for MyFibers {
+    fn strain_energy_aniso(&self, f: &Matrix3<f64>, ctx: &MaterialContext) -> f64 { todo!() }
+    fn pk2_stress_aniso(&self, f: &Matrix3<f64>, ctx: &mut MaterialContext) -> Matrix3<f64> { todo!() }
+    fn tangent_aniso(&self, f: &Matrix3<f64>, ctx: &MaterialContext) -> Matrix6<f64> { todo!() }
+}
+
+let mat = CompressibleAnisotropicMaterial {
+    iso:     NeoHookeanIso { mu: 500.0 },
+    aniso:   MyFibers { k1: 2363.0, k2: 0.84 },
+    vol:     VolumetricLnJ { kappa: 10000.0 },
+    density: 1000.0,
+};
+```
+
+### Option C — Viscoelastic model
+
+Any `CompressibleMaterial` or `CompressibleAnisotropicMaterial` can be wrapped in
+`ViscoelasticMaterial` to add Prony series dissipation. Use `NoAnisotropy` for isotropic
+viscoelastic materials.
+
+```rust
+use orfas_core::material::{
+    ViscoelasticMaterial, NeoHookeanIso, NoAnisotropy, VolumetricLnJ,
+    InternalVariables, SimulationContext,
+};
+
+let mat = ViscoelasticMaterial {
+    iso:        NeoHookeanIso { mu: 500.0 },
+    aniso:      NoAnisotropy,
+    vol:        VolumetricLnJ { kappa: 10000.0 },
+    density:    1000.0,
+    tau_iso:    vec![1.0, 10.0],   // two relaxation times
+    beta_iso:   vec![0.3, 0.1],    // Prony factors
+    tau_aniso:  vec![],
+    beta_aniso: vec![],
+};
+
+// Initialize internal variables and simulation context
+let n_elements = mesh.elements.len();
+let iv = InternalVariables::new(n_elements, mat.m_iso(), mat.m_aniso());
+let mut sim_ctx = SimulationContext::isotropic_viscoelastic(n_elements, dt, iv);
+
+// After Newton convergence at each time step:
+assembler.update_internal_variables(&mesh, &mat, &u, &mut sim_ctx);
+```
+
+### Option D — Fully coupled model
+
+If your model does not admit an isochoric/volumetric split, implement `MaterialLaw` directly:
 
 ```rust
 use nalgebra::{Matrix3, Matrix6};
-use orfas_core::material::MaterialLaw;
+use orfas_core::material::{MaterialLaw, MaterialContext};
 
-pub struct MyMaterial {
-    pub param: f64,
-    pub density: f64,
-}
+pub struct MyMaterial { pub param: f64, pub density: f64 }
 
 impl MaterialLaw for MyMaterial {
-    fn strain_energy(&self, f: &Matrix3<f64>) -> f64 { todo!() }
-    fn pk2_stress(&self, f: &Matrix3<f64>) -> Matrix3<f64> { todo!() }
-    fn tangent_stiffness(&self, f: &Matrix3<f64>) -> Matrix6<f64> { todo!() }
     fn density(&self) -> f64 { self.density }
+    fn strain_energy(&self, f: &Matrix3<f64>, _ctx: &MaterialContext) -> f64 { todo!() }
+    fn pk2_stress(&self, f: &Matrix3<f64>, _ctx: &mut MaterialContext) -> Matrix3<f64> { todo!() }
+    fn tangent_stiffness(&self, f: &Matrix3<f64>, _ctx: &MaterialContext) -> Matrix6<f64> { todo!() }
 }
 ```
 
 ### Validation
 
-Whichever option you choose, validate your implementation using the standard test suite pattern:
+Validate your implementation using the standard test suite:
 
 ```rust
-run_standard_material_tests(&mat, lambda_eff, mu_eff);
+run_standard_material_tests(&mat, lambda_eff, mu_eff, &mut MaterialContext::default());
 ```
 
 This checks that at `F = I`: `W = 0`, `S = 0`, `C = C_Hooke`, and that the analytical tangent
-matches central finite differences at a moderate deformation. All three conditions are necessary
-for a physically correct and numerically consistent implementation.
+matches central finite differences at moderate deformation.
 
 ---
 
 ## Changelog
+
+### v0.7.1
+
+#### Materials
+- **`HolzapfelOgden`** — anisotropic isochoric fiber model (Holzapfel-Gasser-Ogden); strain energy
+  W = k₁/(2k₂)·Σᵢ[exp(k₂·(Ī₄ᵢ−1)²)−1]; fibers only contribute under tension (Ī₄ᵢ > 1);
+  analytical PK2 stress and tangent derived following Cheng & Zhang (2018) eqs. (49), (56)
+- **`NoAnisotropy`** — null implementation of `AnisotropicPart`; returns zero for all contributions;
+  zero runtime cost (compiler inlines and eliminates all additions)
+- **`CompressibleAnisotropicMaterial<I, A, V>`** — generic struct composing `IsochoricPart`,
+  `AnisotropicPart`, and `VolumetricPart` into a full `MaterialLaw`; natural extension of
+  `CompressibleMaterial` for fiber-reinforced tissues
+- **`ViscoelasticMaterial<I, A, V>`** — generic viscoelastic wrapper using Prony series on the
+  isochoric and anisotropic contributions; volumetric part remains purely elastic; implements the
+  algorithmic update from Holzapfel & Gasser (2001) Box 1; composable with any `IsochoricPart`,
+  `AnisotropicPart`, and `VolumetricPart`
+  - `pk2_stress` — reads precomputed `sum_Q` from `iv_ref` in O(1); read-only on internal variables
+  - `update_state` — computes Q_α_n+1 via Prony recurrence, writes Q_α, S_prev, sum_Q; called once
+    per time step after Newton convergence (SOFA/FEBio pattern)
+  - `tangent_stiffness` — algorithmic tangent C = C_vol + (1+δ_iso)·C_iso + (1+δ_aniso)·C_aniso
+    where δ_a = Σ_α β_αa·exp(−Δt/2τ_αa)
+
+#### Architecture
+- **`MaterialContext<'a>`** — new `iv_ref: Option<&'a ElementInternalVars>` field for read-only
+  access to internal variables in `pk2_stress`; `iv: Option<&'a mut ElementInternalVars>` retained
+  for write access in `update_state`; separates read and write paths cleanly
+- **`SimulationContext`** — added `iv: Option<InternalVariables>` field; new constructors
+  `viscoelastic` and `isotropic_viscoelastic`; `material_context_for` now populates `iv_ref`;
+  `material_context_for_mut` populates `iv` for `update_internal_variables`
+- **`FiberField`** — fiber direction storage decoupled from `MaterialContext`; stored once in
+  `SimulationContext`, borrowed per element at assembly time via `directions_for(elem_idx)`
+- **`InternalVariables`** / **`ElementInternalVars`** — new module `material/internal_variables.rs`;
+  flat `DVector<f64>` storage per element with layout `[Q_iso×m_iso][Q_aniso×m_aniso][S_iso_prev][S_aniso_prev][sum_Q]`,
+  total `6*(m_iso + m_aniso + 3)` scalars; `sum_Q` precomputed for O(1) reads
+
+#### Assembler
+- **`update_internal_variables`** — new method on `Assembler`; calls `material.update_state` for
+  each element after Newton convergence; no-op for elastic materials (`iv.is_none()`); takes
+  `&mut SimulationContext` — the only assembler method that mutates the context
+- **`assemble_internal_forces`** — now passes `iv_ref` via `material_context_for`; reads `sum_Q`
+  correctly for viscoelastic materials during Newton iterations without corrupting internal state
+- **Module split** — `assembler.rs` split into `assembler/mod.rs`, `assembler/geometry.rs`,
+  `assembler/pattern.rs`, `assembler/assembly.rs`, `assembler/tests.rs`
+
+#### Tests
+- **`material/tests/`** — `tests.rs` split into `mod.rs`, `helpers.rs`, `elastic.rs`,
+  `anisotropic.rs`, `viscoelastic.rs`
+- **`run_viscoelastic_tests`** — parametric suite: elastic fallback, zero stress at F=I,
+  relaxation convergence, algorithmic tangent scaling verification
+- **`test_viscoelastic_relaxation`** — integration test in `lib.rs`; full pipeline with assembler,
+  `update_internal_variables`, and reaction force convergence to elastic equilibrium
+
+#### References
+- Holzapfel, G.A., & Gasser, T.C. (2001). A viscoelastic model for fiber-reinforced composites at
+  finite strains. *Computer Methods in Applied Mechanics and Engineering*, 190, 4379–4403.
 
 ### v0.7.0
 - **Isochoric/volumetric split architecture** — new `IsochoricPart` and `VolumetricPart` traits replacing the monolithic `NeoHookean` struct; `CompressibleMaterial<I, V>` composes any pair into a full `MaterialLaw`
@@ -264,60 +401,46 @@ for a physically correct and numerically consistent implementation.
 - **`entry_map`** — `HashMap<(i,j), idx>` cached at `Assembler::new`; enables O(1) direct write into CSR values array per element
 - **`build_element_colors`** — greedy graph coloring of elements (available, unused); stored as `Option<Vec<Vec<usize>>>` in `Assembler` for future use
 - **Viewer** — `SolverChoice::NewtonSparseParallel` added; selectable as "Newton (sparse CG parallel)" in the UI
-- **`assemble_internal_forces_parallel`** — evaluated and abandoned; assembly too fast (~11ms) for rayon overhead to pay off on any mesh size tested
 
 ### v0.6.0
 - **Sparse solvers** (`orfas-core/src/sparse.rs`) — new module providing sparse linear and nonlinear solvers
 - **`SparseSolver` trait** — mirror of `DenseSolver` operating on `CsrMatrix<f64>` (nalgebra-sparse)
 - **`CgSolver`** — preconditioned conjugate gradient solver; supports `Preconditioner::Identity` and `Preconditioner::Ilu(k)`
-- **`ILU(0)` preconditioner** — incomplete LU factorization with zero fill-in; implemented from scratch using a sparse row buffer strategy; includes `forward_substitution` and `backward_substitution` for triangular solves
-- **`assemble_tangent_sparse`** — new sparse assembly method on `Assembler`, building a `CsrMatrix` via COO accumulation; pattern not precalculated, entries pushed per element
-- **`NonlinearSparseSolver` trait** and **`NewtonRaphsonSparse`** — sparse equivalent of `NewtonRaphson`; uses `assemble_tangent_sparse` and `restrict_matrix_sparse` internally
-- **`restrict_matrix_sparse`** — filters `CsrMatrix` triplets to free DOFs via `HashMap<global, local>` mapping
-- **`DenseSolver` rename** — `Solver` trait renamed to `DenseSolver` for clarity; all existing implementations and call sites updated
-- **Viewer** — `SolverChoice::NewtonSparse` added; selectable as "Newton (sparse CG)" in the UI
+- **`ILU(0)` preconditioner** — incomplete LU factorization with zero fill-in
+- **`assemble_tangent_sparse`** — new sparse assembly method on `Assembler`
+- **`NonlinearSparseSolver` trait** and **`NewtonRaphsonSparse`** — sparse equivalent of `NewtonRaphson`
+- **`DenseSolver` rename** — `Solver` trait renamed to `DenseSolver` for clarity
 
 ### v0.5
-- **Neo-Hookean hyperelastic material** (`NeoHookean`) — compressible coupled formulation:
-  `W = μ/2·(I₁−3) − μ·ln(J) + λ/2·(ln J)²`, with `S = μ(I − C⁻¹) + λ·ln(J)·C⁻¹`
-  and full analytical tangent stiffness `C_tangent = dS/dE` depending on `F` — requires K reassembly at each Newton iteration
+- **Neo-Hookean hyperelastic material** (`NeoHookean`) — compressible coupled formulation
 - **`NewtonRaphsonCachedK`** — Newton-Raphson variant that factorizes `K_tangent` once at `u=0`
-  and reuses the LU factorization across all Newton iterations; valid for SVK where `C_tangent` is constant;
-  reduces cost from `N×O(n³)` to `O(n³) + N×O(n²)` for `N` Newton iterations
-- **Viewer refactored** into 5 focused modules (`app.rs`, `state.rs`, `simulation.rs`, `render.rs`, `main.rs`)
-- **Improved camera** — orbit with explicit target point, Shift+drag pan, multiplicative scroll zoom,
-  pitch clamp to avoid gimbal flip, auto-focus on mesh bounding box at load/simulate,
-  proper view matrix via `right/up/forward` vectors, depth-sorted node rendering (painter's algorithm)
-- Neo-Hookean and Newton (cached K) selectable in the viewer UI
+- **Viewer refactored** into 5 focused modules
+- **Improved camera** — orbit, pan, zoom, depth-sorted node rendering
 
 ### v0.4
-- Nonlinear hyperelastic material: `SaintVenantKirchhoff` — replaces `LinearElastic`, reduces to linear elasticity for small deformations
-- Fully refactored `MaterialLaw` trait: `pk2_stress(F)`, `tangent_stiffness(F)`, `strain_energy(F)` — all taking the deformation gradient `F` as input
-- `NonlinearSolver` trait and `NewtonRaphson` implementation with SOFA-style normalized convergence criteria
-- `BoundaryConditionResult::reconstruct_ref` — non-consuming reconstruction for Newton loops
-- Nonlinear implicit Euler integrator — Newton-Raphson loop inside the time step; system matrix `A = M/dt + C + dt·K_tangent`
+- Nonlinear hyperelastic material: `SaintVenantKirchhoff`
+- Fully refactored `MaterialLaw` trait
+- `NonlinearSolver` trait and `NewtonRaphson` implementation
+- Nonlinear implicit Euler integrator
 
 ### v0.3
-- Dynamic simulation: `MechanicalState` (position, velocity, acceleration as `DVector<f64>`)
-- Lumped mass assembly (`assemble_mass`) — 1/4 of element mass per connected node
-- Rayleigh damping `C = α·M + β·K`
-- Implicit Euler integrator — unconditionally stable, Newton loop for nonlinear materials
-- `restrict_matrix` / `restrict_vector` — helpers for extracting free DOFs
+- Dynamic simulation: `MechanicalState`
+- Lumped mass assembly
+- Rayleigh damping
+- Implicit Euler integrator
 
 ### v0.2
-- `read_vtk` in `orfas-io` — ASCII VTK parser, state machine, line-by-line
-- `EliminationMethod` — reduces system to free DOFs, more stable than penalty
-- `FixedNode` with per-axis flags — directional constraints
-- `BoundaryConditionResult` — separates reduced and full DOF spaces
-- Node inspector in viewer — click to select, toggle fixed, apply force
+- `read_vtk` in `orfas-io`
+- `EliminationMethod`
+- `FixedNode` with per-axis flags
+- Node inspector in viewer
 
 ### v0.1
-- Linear tetrahedral elements (CST 3D) with constant strain-displacement matrix B
-- Structured mesh generation (`Mesh::generate`)
-- Penalty method for zero-displacement boundary conditions
+- Linear tetrahedral elements (CST 3D)
+- Structured mesh generation
+- Penalty method for boundary conditions
 - Direct LU solver
-- Interactive egui viewer with 3D perspective projection, rotation, zoom
-- Deformed shape visualization with displacement colormap
+- Interactive egui viewer
 
 ---
 
@@ -333,7 +456,7 @@ for a physically correct and numerically consistent implementation.
 | **v0.6.0** | ✅ Done | **Performance** — sparse solvers (CsrMatrix), conjugate gradient with ILU(0) preconditioner, NewtonRaphsonSparse |
 | **v0.6.1** | ✅ Done | **Performance** — parallel sparse assembly (rayon, ~10x speedup), pre-built CSR pattern, SparseAssemblyStrategy trait |
 | **v0.7.0** | ✅ Done | **Materials** — isochoric/volumetric split architecture, NeoHookeanIso, MooneyRivlinIso, OgdenIso, VolumetricLnJ, VolumetricQuad |
-| **v0.7.1** | ⬜ Planned | **Materials** — Holzapfel-Ogden (anisotropic fibers), viscoelastic (Maxwell, Kelvin-Voigt) |
+| **v0.7.1** | ✅ Done | **Materials** — HolzapfelOgden anisotropic fibers, ViscoelasticMaterial (Prony series), MaterialContext/SimulationContext architecture, FiberField, InternalVariables |
 | **v0.7.2** | ⬜ Planned | **Materials** — `orfas-tissues` preset library with nominal values, confidence intervals and literature references; automatic thermodynamic consistency checks |
 | **v0.8.0** | ⬜ Planned | **Elements** — `FiniteElement` trait abstraction, Tet10 (quadratic, reduces shear locking) |
 | **v0.8.1** | ⬜ Planned | **Elements** — Hex8, shells, beams |
@@ -410,6 +533,8 @@ following publications:
 - Cheng, J., & Zhang, L. T. (2018). A general approach to derive stress and elasticity tensors for hyperelastic isotropic and anisotropic biomaterials. *International Journal of Computational Methods*, 15(04), 1850028. https://doi.org/10.1142/S0219876218500287
 
 - Connolly, S. J., Mackenzie, D., & Gorash, Y. (2019). Isotropic hyperelasticity in principal stretches: explicit elasticity tensors and numerical implementation. *Computational Mechanics*, 64(5), 1273–1288. https://doi.org/10.1007/s00466-019-01707-1
+
+- Holzapfel, G. A., & Gasser, T. C. (2001). A viscoelastic model for fiber-reinforced composites at finite strains: Continuum basis, computational aspects and applications. *Computer Methods in Applied Mechanics and Engineering*, 190, 4379–4403. https://doi.org/10.1016/S0045-7825(00)00323-6
 
 ---
 
