@@ -12,6 +12,7 @@ use crate::material::context::MaterialContext;
 /// Used with `ViscoelasticMaterial<I, NoAnisotropy, V>` when no fiber reinforcement
 /// is needed. The compiler inlines all calls and eliminates the zero additions,
 /// so there is no runtime cost compared to a purely isotropic material.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct NoAnisotropy;
 
 impl AnisotropicPart for NoAnisotropy {

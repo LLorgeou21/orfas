@@ -115,10 +115,10 @@ pub fn run_simulation_static(state: &mut AppState) {
         match result {
             Ok(u) => {
                 state.displacements = Some(u);
-                state.mesh          = Some(mesh);
             }
             Err(e) => println!("Simulation error: {:?}", e),
         }
+        state.mesh = Some(mesh);
     }
 }
 

@@ -27,6 +27,7 @@ use super::helpers::{lame, hooke_voigt, green_lagrange};
 ///   youngs_modulus — Young's modulus (Pa), must be > 0
 ///   poisson_ratio  — Poisson's ratio (dimensionless), must be in (0, 0.5)
 ///   density        — mass density (kg/m^3), must be > 0
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SaintVenantKirchhoff {
     pub youngs_modulus: f64,
     pub poisson_ratio:  f64,

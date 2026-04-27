@@ -23,6 +23,7 @@ use crate::material::traits::IsochoricPart;
 ///   mu    — shear-like moduli (Pa), Vec of length N
 ///   alpha — exponent parameters (dimensionless), Vec of length N
 ///   Stability condition: sum_i mu_i * alpha_i > 0
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct OgdenIso {
     pub mu:    Vec<f64>,
     pub alpha: Vec<f64>,

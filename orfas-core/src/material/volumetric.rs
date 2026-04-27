@@ -18,6 +18,7 @@ use super::traits::VolumetricPart;
 ///
 /// Parameters:
 ///   kappa — bulk modulus (Pa), must be > 0
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VolumetricLnJ {
     pub kappa: f64,
 }
@@ -64,6 +65,7 @@ impl VolumetricPart for VolumetricLnJ {
 ///
 /// Parameters:
 ///   kappa — bulk modulus (Pa), must be > 0
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct VolumetricQuad {
     pub kappa: f64,
 }

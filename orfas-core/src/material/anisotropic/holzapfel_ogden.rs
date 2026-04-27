@@ -34,6 +34,7 @@ use crate::material::helpers::{
 /// Parameters:
 ///   k1 > 0  stress-like parameter (Pa)
 ///   k2 > 0  dimensionless exponential parameter
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct HolzapfelOgden {
     /// Stress-like fiber parameter (Pa). Must be > 0.
     pub k1: f64,

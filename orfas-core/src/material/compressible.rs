@@ -32,6 +32,7 @@ use super::helpers::cinv_tangent_voigt;
 /// Type parameters:
 ///   I — isochoric part, implements `IsochoricPart`
 ///   V — volumetric part, implements `VolumetricPart`
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CompressibleMaterial<I: IsochoricPart, V: VolumetricPart> {
     /// Isochoric (deviatoric) part of the strain energy.
     pub iso: I,
@@ -125,6 +126,7 @@ impl<I: IsochoricPart, V: VolumetricPart> MaterialLaw for CompressibleMaterial<I
 ///       vol:     VolumetricLnJ { kappa },
 ///       density: rho,
 ///   }
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CompressibleAnisotropicMaterial<I: IsochoricPart,A: AnisotropicPart,V: VolumetricPart,>{
     /// Isochoric ground matrix contribution (e.g. NeoHookeanIso).
     pub iso: I,

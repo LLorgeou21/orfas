@@ -34,6 +34,7 @@ use crate::material::helpers::{
 /// Parameters:
 ///   c1 — first Mooney-Rivlin constant (Pa), must be > 0
 ///   c2 — second Mooney-Rivlin constant (Pa), can be negative but c1+c2 > 0
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct MooneyRivlinIso {
     pub c1: f64,
     pub c2: f64,
