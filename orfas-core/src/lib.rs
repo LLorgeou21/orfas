@@ -8,6 +8,43 @@ pub mod integrator;
 pub mod mechanical_state;
 pub mod sparse;
 
+// ─── Public re-exports ────────────────────────────────────────────────────────
+
+// Material laws
+pub use material::{
+    MaterialLaw,
+    SaintVenantKirchhoff,
+    NeoHookeanIso, MooneyRivlinIso, OgdenIso,
+    VolumetricLnJ, VolumetricQuad,
+    CompressibleMaterial, CompressibleAnisotropicMaterial,
+    HolzapfelOgden, NoAnisotropy,
+    ViscoelasticMaterial,
+    MaterialContext, SimulationContext,
+    InternalVariables, ElementInternalVars,
+    lame, hooke_voigt,
+    check_thermodynamic_consistency,
+};
+
+// Mesh
+pub use mesh::{Mesh, Node, Tetrahedron};
+
+// Assembler
+pub use assembler::Assembler;
+
+// Boundary conditions
+pub use boundary::{BoundaryConditions, FixedNode};
+
+// Solvers
+pub use solver::{DenseSolver, NonlinearSolver, NewtonRaphson};
+
+// Sparse
+pub use nalgebra_sparse::csr::CsrMatrix;
+
+// Dynamics
+pub use mechanical_state::MechanicalState;
+pub use damping::RayleighDamping;
+pub use integrator::ImplicitEulerIntegrator;
+
 #[cfg(test)]
 mod integration_tests {
     use crate::mesh::Mesh;

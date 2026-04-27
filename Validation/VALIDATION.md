@@ -1097,3 +1097,185 @@ All existing assembly tests pass unchanged after the split.
 | `test_viscoelastic_relaxation` | Full pipeline integration test: relaxation to elastic equilibrium | PASS |
 | All v0.1–v0.7.0 tests | Unchanged | PASS |
 | **Total** | **54 tests** | **54 PASS / 0 FAIL** |
+
+## v0.7.2 — orfas-tissues preset library and thermodynamic consistency checks
+
+### What was added
+
+- **`orfas-tissues`** — new crate providing 10 calibrated tissue presets from the biomechanics
+  literature, each with nominal parameter values, per-parameter confidence intervals, literature
+  reference, experimental protocol, and optional DOI
+- **`check_thermodynamic_consistency`** — runtime function in `orfas-core` verifying 8 necessary
+  thermodynamic conditions for any `MaterialLaw` implementation
+- **`run_standard_material_tests` updated** — adds 2 new checks (positive definiteness of C,
+  frame objectivity) to the existing test suite; all existing material tests pass unchanged
+- **JSON loader** — `load_preset_from_file` / `load_preset_from_str` for loading custom presets
+  at runtime without recompilation
+- **Viewer UI reorganized** — Material section split into Manual and Tissue Preset tabs;
+  sections collapsed into logical groups (Mesh, Material, Solver & Simulation, Boundary Conditions)
+
+---
+
+### Thermodynamic consistency checks
+
+`check_thermodynamic_consistency(mat, lame, ctx)` runs 8 checks on any `MaterialLaw`.
+The same checks power `run_standard_material_tests` via shared `pub(crate)` functions
+returning `Option<String>` — eliminating duplication between the runtime and test paths.
+
+| Check | Condition | Tolerance |
+|---|---|---|
+| 1. Zero energy at rest | `W(F=I) = 0` | < 1×10⁻¹⁰ |
+| 2. Zero stress at rest | `‖S(F=I)‖ = 0` | < 1×10⁻¹⁰ |
+| 3. Hooke at rest | `‖C(F=I) − C_Hooke‖ = 0` (skipped if lame=None) | < 1×10⁻⁶ |
+| 4. Tangent symmetry | `‖C(F) − C(F)ᵀ‖ / ‖C(F)‖ = 0` | < 1×10⁻¹² (relative) |
+| 5. Non-negative energy | `W(F) ≥ 0` for admissible F | exact |
+| 6. Small-strain linearization | `‖S − σ_lin‖ / ‖σ_lin‖` for small grad_u (skipped if lame=None) | < 1×10⁻³ |
+| 7. Positive definiteness | min eigenvalue of C(F=I) > 0 | exact |
+| 8. Frame objectivity | `‖W(QF) − W(F)‖ / W(F)` for 4 rotations | < 1×10⁻⁸ (relative) |
+
+Checks 3 and 6 are skipped when `lame = None` — used for anisotropic materials (HGO) where
+the effective Lamé parameters depend on fiber directions not available at check time.
+
+Check 4 uses a relative tolerance (`abs_err / ‖C‖`) rather than absolute, after discovering
+that materials with large bulk modulus (e.g. tendon, kappa = 1×10⁸ Pa) produced floating-point
+asymmetries of ~1×10⁻⁹ — below physical significance but above the former absolute threshold
+of 1×10⁻¹⁰. The relative threshold of 1×10⁻¹² is equivalent to ~14 significant digits and
+does not mask any real asymmetry.
+
+Rotations used for objectivity check (Check 8):
+- 90° around X axis
+- 90° around Y axis
+- 90° around Z axis
+- 90° around the normalized (1, 1, 1) axis
+
+---
+
+### orfas-tissues — tissue preset library
+
+#### Architecture
+
+| Component | Description |
+|---|---|
+| `TissueMetadata` | Static metadata (`&'static str`), zero runtime overhead, compile-time constants |
+| `TissueMetadataOwned` | Runtime-owned metadata (`String`), used exclusively by the JSON loader |
+| `ConfidenceInterval` | Per-parameter `{ min, max }` range from the reference paper |
+| `TissuePreset` trait | `metadata() -> &TissueMetadata` + `material() -> Box<dyn MaterialLaw>` |
+| `all_presets()` | Returns all 10 built-in presets as `Vec<Box<dyn TissuePreset>>` |
+| `load_preset_from_str` / `load_preset_from_file` | JSON loader, dispatches on `"model"` field |
+
+The two metadata types are intentionally separate: `TissueMetadata` uses `&'static str` for
+zero-overhead access from the viewer; `TissueMetadataOwned` uses `String` for JSON
+deserialization. Conversion from owned to static is not possible at runtime by design.
+
+#### Preset library
+
+| Preset | Model | Reference | CI parameters |
+|---|---|---|---|
+| `LiverNeoHookean` | Neo-Hookean | Nava et al. (2008) | mu, kappa |
+| `BrainGreyMatter` | Mooney-Rivlin | Budday et al. (2017) | c1, c2, kappa |
+| `BrainWhiteMatter` | Mooney-Rivlin | Budday et al. (2017) | c1, c2, kappa |
+| `CardiacMyocardium` | Holzapfel-Ogden | Holzapfel & Ogden (2009) | mu, k1, k2, kappa |
+| `ArterialWallMedia` | Holzapfel-Ogden | Holzapfel et al. (2000) | mu, k1, k2, kappa |
+| `TendonGroundMatrix` | Neo-Hookean | Weiss et al. (1996) | mu, kappa |
+| `LigamentMCL` | Holzapfel-Ogden | Weiss et al. (1996) | mu, k1, k2, kappa |
+| `SkinMooneyRivlin` | Mooney-Rivlin | Groves et al. (2013) | c1, c2, kappa |
+| `KidneyNeoHookean` | Neo-Hookean | Nasseri et al. (2002) | mu, kappa |
+| `ProstateNeoHookean` | Neo-Hookean | Phipps et al. (2005) | mu, kappa |
+
+#### JSON preset format
+
+```json
+{
+    "name": "Liver",
+    "model": "neo_hookean",
+    "reference": "Nava et al. (2008), Med. Image Anal.",
+    "doi": "10.1016/j.media.2007.09.001",
+    "protocol": "ex vivo indentation, porcine liver",
+    "parameters": {
+        "mu": 2100.0,
+        "kappa": 50000.0,
+        "density": 1060.0
+    },
+    "confidence_intervals": {
+        "mu": { "min": 1500.0, "max": 3000.0 }
+    },
+    "notes": "Room temperature, fresh tissue"
+}
+```
+
+Supported models: `neo_hookean`, `mooney_rivlin`, `holzapfel_ogden`, `saint_venant_kirchhoff`.
+The `density` field defaults to `1000.0` if absent. The `notes` and `confidence_intervals`
+fields default to empty if absent.
+
+---
+
+### Test suite — orfas-tissues (43 tests)
+
+#### Preset tests (33 tests)
+
+For each of the 10 presets, 3 tests are run:
+
+| Test pattern | Description |
+|---|---|
+| `test_*_thermodynamic_consistency` | `check_thermodynamic_consistency` passes with correct Lamé params (or None for HGO) |
+| `test_*_confidence_intervals` | All nominal parameter values fall within their reported CI |
+| `test_*_metadata` | All metadata string fields are non-empty |
+
+Additional suite-level tests:
+
+| Test | Description |
+|---|---|
+| `test_all_presets_count` | `all_presets()` returns exactly 10 presets |
+| `test_all_presets_metadata_non_empty` | All presets pass metadata non-empty check |
+| `test_all_presets_thermodynamic_consistency_no_lame` | All presets pass checks 1,2,4,5,7,8 (lame=None smoke test) |
+
+#### JSON loader tests (10 tests)
+
+| Test | Description |
+|---|---|
+| `test_load_neo_hookean_from_str` | Parse liver JSON, verify metadata and density |
+| `test_load_mooney_rivlin_from_str` | Parse brain JSON, verify metadata and density |
+| `test_load_holzapfel_ogden_from_str` | Parse cardiac JSON, verify metadata and density |
+| `test_load_saint_venant_kirchhoff_from_str` | Parse bone JSON, verify metadata and density |
+| `test_load_default_density_when_absent` | Missing density defaults to 1000.0 |
+| `test_load_notes_default_empty_when_absent` | Missing notes defaults to empty string |
+| `test_load_unknown_model_returns_error` | Unknown model returns `LoadError::UnknownModel` |
+| `test_load_missing_parameter_returns_error` | Missing required param returns `LoadError::MissingParameter` |
+| `test_load_invalid_json_returns_error` | Malformed JSON returns `LoadError::Json` |
+| `test_round_trip_serialize_deserialize` | Load → serialize → load; metadata and parameters survive round-trip |
+
+---
+
+### Test suite — orfas-core updates (2 new checks)
+
+`run_standard_material_tests` was extended with 2 new checks shared with
+`check_thermodynamic_consistency`. All existing material tests pass unchanged.
+
+| New check | Verified on |
+|---|---|
+| Positive definiteness of C(F=I) | SVK, NeoHookean, MooneyRivlin, Ogden, HGO, Viscoelastic |
+| Frame objectivity W(QF) = W(F) | SVK, NeoHookean, MooneyRivlin, Ogden, HGO, Viscoelastic |
+
+---
+
+### Summary
+
+| Test | Description | Status |
+|---|---|---|
+| `test_liver_thermodynamic_consistency` | 8 checks pass for LiverNeoHookean | PASS |
+| `test_brain_grey_thermodynamic_consistency` | 8 checks pass for BrainGreyMatter | PASS |
+| `test_brain_white_thermodynamic_consistency` | 8 checks pass for BrainWhiteMatter | PASS |
+| `test_cardiac_thermodynamic_consistency` | 6 checks pass for CardiacMyocardium (lame=None) | PASS |
+| `test_arterial_thermodynamic_consistency` | 6 checks pass for ArterialWallMedia (lame=None) | PASS |
+| `test_tendon_thermodynamic_consistency` | 8 checks pass for TendonGroundMatrix | PASS |
+| `test_ligament_thermodynamic_consistency` | 6 checks pass for LigamentMCL (lame=None) | PASS |
+| `test_skin_thermodynamic_consistency` | 8 checks pass for SkinMooneyRivlin | PASS |
+| `test_kidney_thermodynamic_consistency` | 8 checks pass for KidneyNeoHookean | PASS |
+| `test_prostate_thermodynamic_consistency` | 8 checks pass for ProstateNeoHookean | PASS |
+| `test_*_confidence_intervals` (×10) | Nominal values within reported CI for all presets | PASS |
+| `test_*_metadata` (×10) | All metadata fields non-empty for all presets | PASS |
+| `test_all_presets_count` | `all_presets()` returns 10 presets | PASS |
+| `test_all_presets_thermodynamic_consistency_no_lame` | Smoke test: checks 1,2,4,5,7,8 for all presets | PASS |
+| JSON loader tests (×10) | Load, error handling, round-trip | PASS |
+| All v0.1–v0.7.1 tests | Unchanged | PASS |
+| **Total** | **97 tests** | **97 PASS / 0 FAIL** |

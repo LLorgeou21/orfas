@@ -31,6 +31,7 @@ use crate::material::helpers::{cinv_tangent_voigt, i_tensor_a_plus_a_tensor_i};
 ///
 /// Parameters:
 ///   mu — shear modulus (Pa), must be > 0
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct NeoHookeanIso {
     pub mu: f64,
 }
