@@ -1,5 +1,5 @@
 cff-version: 1.2.0
-title: ORFAS — Open Rust Framework Architecture for Simulation
+title: ORFAS — Open Research Framework for Anatomical Simulation
 message: "If you use this software, please cite it using the metadata below."
 type: software
 authors:
@@ -10,12 +10,19 @@ repository-code: https://github.com/LLorgeou21/orfas
 license: Apache-2.0
 version: 0.8.1
 date-released: "2026-04-29"
+doi: 10.5281/zenodo.19877330
+url: https://doi.org/10.5281/zenodo.19877330
 abstract: >
-  ORFAS is an open-source Finite Element Method framework implemented in Rust,
-  designed for soft tissue simulation in medical and surgical applications.
+  ORFAS is an open-source nonlinear Finite Element Method framework implemented
+  in Rust, designed for soft tissue simulation in medical and surgical applications.
   It provides a modular, trait-based architecture supporting nonlinear hyperelastic
-  materials, sparse iterative solvers, parallel assembly, and implicit time integration
-  on tetrahedral meshes.
+  and viscoelastic materials (Neo-Hookean, Mooney-Rivlin, Ogden, Holzapfel-Ogden,
+  Prony series), multiple element types (Tet4, Tet10, Hex8, Beam2 Euler-Bernoulli,
+  Shell4 MITC4), sparse iterative solvers with ILU(0)-preconditioned conjugate
+  gradient, parallel assembly via Rayon, and implicit Euler time integration.
+  A calibrated tissue preset library (orfas-tissues) provides parameters for
+  liver, brain, myocardium, arterial wall, tendon, skin, kidney, and prostate,
+  grounded in peer-reviewed experimental biomechanics literature.
 keywords:
   - finite-element-method
   - biomechanics
@@ -23,3 +30,7 @@ keywords:
   - rust
   - sparse-solvers
   - medical-simulation
+  - hyperelastic
+  - shell-elements
+  - beam-elements
+  - surgical-simulation

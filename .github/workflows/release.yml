@@ -22,17 +22,17 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact: orfas-viewer-windows-x86_64.exe
-            binary: target/release/orfas-viewer.exe
+            binary: target/x86_64-pc-windows-msvc/release/orfas-viewer.exe
 
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact: orfas-viewer-linux-x86_64
-            binary: target/release/orfas-viewer
+            binary: target/x86_64-unknown-linux-gnu/release/orfas-viewer
 
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact: orfas-viewer-macos-arm64
-            binary: target/release/orfas-viewer
+            binary: target/aarch64-apple-darwin/release/orfas-viewer
 
     steps:
       - uses: actions/checkout@v4

@@ -5,6 +5,7 @@
 [![Status: Pre-Alpha](https://img.shields.io/badge/Status-Pre--Alpha-red.svg)]()
 [![Rust](https://img.shields.io/badge/Rust-2024%20Edition-orange.svg)](https://www.rust-lang.org/)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)]()
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19877330.svg)](https://doi.org/10.5281/zenodo.19877330)
 
 > *An open-source Finite Element Method framework in Rust, designed for medical and biomechanical simulation.*
 
