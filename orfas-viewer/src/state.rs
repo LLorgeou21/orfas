@@ -6,6 +6,7 @@
 //   - MaterialSource separates Manual and TissuePreset modes
 //   - make_material reads from MaterialConfig exclusively
 //   - Camera unchanged
+// v0.8.0: Mesh -> Tet4Mesh
 
 use nalgebra::{DMatrix, DVector, Vector3};
 use orfas_core::{
@@ -17,7 +18,7 @@ use orfas_core::{
 };
 use orfas_tissues::presets::all_presets;
 use orfas_core::mechanical_state::MechanicalState;
-use orfas_core::mesh::Mesh;
+use orfas_core::mesh::Tet4Mesh;
 
 // ─── Material model selector ──────────────────────────────────────────────────
 
@@ -94,8 +95,8 @@ impl Default for MaterialParams {
             density:         1000.0,
             mu:              384615.0,
             kappa:           833333.0,
-            c1:              173077.0,  
-            c2:              19231.0,    
+            c1:              173077.0,
+            c2:              19231.0,
             ogden_mu:        vec![384615.0],
             ogden_alpha:     vec![2.0],
             k1:              2363.2,
@@ -124,11 +125,11 @@ pub struct MaterialConfig {
 impl Default for MaterialConfig {
     fn default() -> Self {
         MaterialConfig {
-            source:           MaterialSource::Manual,
-            model:            MaterialModel::SaintVenantKirchhoff,
-            params:           MaterialParams::default(),
-            preset_index:     0,
-            preset_modified:  false,
+            source:          MaterialSource::Manual,
+            model:           MaterialModel::SaintVenantKirchhoff,
+            params:          MaterialParams::default(),
+            preset_index:    0,
+            preset_modified: false,
         }
     }
 }
@@ -150,15 +151,13 @@ impl MaterialConfig {
         self.preset_modified = false;
         self.source          = MaterialSource::TissuePreset;
 
-        // Map model string to MaterialModel
         self.model = match meta.model {
-            "Neo-Hookean"        => MaterialModel::NeoHookean,
-            "Mooney-Rivlin"      => MaterialModel::MooneyRivlin,
-            "Holzapfel-Ogden"    => MaterialModel::HolzapfelOgden,
-            _                    => MaterialModel::SaintVenantKirchhoff,
+            "Neo-Hookean"     => MaterialModel::NeoHookean,
+            "Mooney-Rivlin"   => MaterialModel::MooneyRivlin,
+            "Holzapfel-Ogden" => MaterialModel::HolzapfelOgden,
+            _                 => MaterialModel::SaintVenantKirchhoff,
         };
 
-        // Fill params from preset nominal values
         let ci = &meta.confidence_intervals;
         let p  = &mut self.params;
 
@@ -168,10 +167,6 @@ impl MaterialConfig {
             MaterialModel::NeoHookean => {
                 p.mu    = ci.get("mu")   .map(|c| (c.min + c.max) / 2.0).unwrap_or(p.mu);
                 p.kappa = ci.get("kappa").map(|c| (c.min + c.max) / 2.0).unwrap_or(p.kappa);
-                // Use nominal center — actual nominal stored in material()
-                // Re-extract from the built material via a test deformation is not
-                // practical here; use midpoint of CI as a reasonable default.
-                // Presets with exact nominal values should override below.
             }
             MaterialModel::MooneyRivlin => {
                 p.c1    = ci.get("c1")   .map(|c| (c.min + c.max) / 2.0).unwrap_or(p.c1);
@@ -189,9 +184,7 @@ impl MaterialConfig {
     }
 
     /// Returns true if any current parameter is outside its confidence interval
-    /// for the active preset.
-    ///
-    /// Always false when source = Manual.
+    /// for the active preset. Always false when source = Manual.
     pub fn is_outside_confidence(&self) -> bool {
         if self.source != MaterialSource::TissuePreset { return false; }
         let presets = all_presets();
@@ -220,9 +213,7 @@ pub enum SolverChoice {
     Direct,
     Newton,
     NewtonCachedK,
-    /// Sparse Newton-Raphson with conjugate gradient — sequential assembly.
     NewtonSparse,
-    /// Sparse Newton-Raphson with conjugate gradient — parallel assembly.
     NewtonSparseParallel,
 }
 
@@ -303,11 +294,11 @@ impl Camera {
     }
 
     pub fn project(&self, point: &Vector3<f64>, center: egui::Pos2, scale: f32) -> egui::Pos2 {
-        let p       = point.cast::<f32>() - self.target;
-        let rx      =  p.dot(&self.right());
-        let ry      =  p.dot(&self.up());
-        let rz      =  p.dot(&self.view_direction());
-        let depth   = (self.distance - rz).max(1e-3);
+        let p     = point.cast::<f32>() - self.target;
+        let rx    = p.dot(&self.right());
+        let ry    = p.dot(&self.up());
+        let rz    = p.dot(&self.view_direction());
+        let depth = (self.distance - rz).max(1e-3);
         egui::Pos2::new(
             center.x + rx / depth * scale,
             center.y - ry / depth * scale,
@@ -342,7 +333,7 @@ pub struct AppState {
     pub dt:    f64,
 
     // Simulation data
-    pub mesh:              Option<Mesh>,
+    pub mesh:              Option<Tet4Mesh>,
     pub displacements:     Option<DVector<f64>>,
     pub initial_positions: Option<DVector<f64>>,
     pub mechanical_state:  Option<MechanicalState>,
@@ -365,7 +356,7 @@ pub struct AppState {
     pub mesh_path:         Option<String>,
 
     // Json reading
-    pub last_error: Option<String>,
+    pub last_error:         Option<String>,
     pub loaded_preset_name: Option<String>,
 }
 
@@ -398,7 +389,7 @@ impl AppState {
             camera:            Camera::default(),
             deformation_scale: 30.,
             mesh_path:         None,
-            last_error: None,
+            last_error:         None,
             loaded_preset_name: None,
         }
     }
@@ -409,8 +400,7 @@ impl AppState {
 /// Build the active material law from the current MaterialConfig.
 ///
 /// Reads exclusively from `state.material` — no other AppState fields
-/// are used. This function is called by both static and dynamic simulation
-/// paths and must remain pure (no side effects on state).
+/// are used. Pure function — no side effects on state.
 pub fn make_material(state: &AppState) -> Box<dyn MaterialLaw> {
     let p = &state.material.params;
     match state.material.model {

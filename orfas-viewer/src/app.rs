@@ -13,10 +13,11 @@
 
 use nalgebra::{DVector, Vector3};
 use orfas_core::{
-    assembler::{Assembler, LinearBMatrix},
+    assembler::{Assembler},
     boundary::{Constraint, FixedNode, Load},
     integrator::{ImplicitEulerIntegrator, IntegratorMethod},
     solver::DirectSolver,
+    element::Tet4,
 };
 use orfas_io::read_vtk;
 use orfas_tissues::presets::all_presets;
@@ -89,9 +90,9 @@ impl MyEguiApp {
             self.state.initial_positions.as_ref(),
         ) {
             if let Some(ref mesh) = self.state.mesh {
-                let assembler  = Assembler::new(mesh);
+                let assembler = Assembler::<Tet4>::new(mesh);
                 let integrator = ImplicitEulerIntegrator::default();
-                match integrator.step::<LinearBMatrix>(
+                match integrator.step(
                     mech, mass, c, f, self.state.dt,
                     &assembler, mesh, material.as_ref(), bc_result, &DirectSolver,
                 ) {
@@ -738,7 +739,7 @@ impl MyEguiApp {
 
             // Edges
             for tetra in &mesh.elements {
-                let pts: Vec<egui::Pos2> = tetra.indices.iter()
+                let pts: Vec<egui::Pos2> = tetra.iter()
                     .map(|&i| self.state.camera.project(&deformed_pos(i), center, scale))
                     .collect();
                 for (a, b) in [(0,1),(0,2),(0,3),(1,2),(1,3),(2,3)] {
@@ -768,7 +769,7 @@ impl MyEguiApp {
         } else {
             // Reference mesh
             for tetra in &mesh.elements {
-                let pts: Vec<egui::Pos2> = tetra.indices.iter()
+                let pts: Vec<egui::Pos2> = tetra.iter()
                     .map(|&i| self.state.camera.project(&mesh.nodes[i].position, center, scale))
                     .collect();
                 for (a, b) in [(0,1),(0,2),(0,3),(1,2),(1,3),(2,3)] {

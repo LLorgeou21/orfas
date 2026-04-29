@@ -5,18 +5,32 @@ use nalgebra_sparse::CsrMatrix;
 use std::collections::{HashMap, HashSet};
 
 /// Pre-computes the CSR sparsity pattern from mesh connectivity.
+/// Works for any element size — connectivity is a slice of node index lists.
+/// Called once in Assembler::new; result stored for the simulation lifetime.
 pub fn build_csr_pattern(
-    connectivity: &[[usize; 4]],
+    connectivity: &[Vec<usize>],
     n: usize,
 ) -> (CsrMatrix<f64>, HashMap<(usize, usize), usize>) {
     let mut pairs: std::collections::BTreeSet<(usize, usize)> = Default::default();
-    for &[a, b, c, d] in connectivity {
-        let nodes = [a, b, c, d];
-        for &r in &nodes {
-            for &s in &nodes {
-                for dr in 0..3 {
-                    for dc in 0..3 {
-                        pairs.insert((3 * r + dr, 3 * s + dc));
+
+    // Derive ndof from the matrix size n and the max node index in connectivity.
+    // n = ndof * n_nodes, and node indices are 0..n_nodes-1.
+    // We infer ndof by finding max node index + 1 and dividing n by it.
+    // This avoids threading ndof through the call site while remaining correct
+    // for any DofType (Vec3Dof ndof=3, Vec6Dof ndof=6).
+    let max_node = connectivity.iter()
+        .flat_map(|nodes| nodes.iter().copied())
+        .max()
+        .unwrap_or(0);
+    let n_nodes = max_node + 1;
+    let ndof    = if n_nodes > 0 { n / n_nodes } else { 3 };
+
+    for nodes in connectivity {
+        for &r in nodes {
+            for &s in nodes {
+                for dr in 0..ndof {
+                    for dc in 0..ndof {
+                        pairs.insert((ndof * r + dr, ndof * s + dc));
                     }
                 }
             }
@@ -48,12 +62,14 @@ pub fn build_csr_pattern(
 }
 
 /// Greedy element coloring for parallel assembly.
-/// Elements of the same color share no nodes.
-pub fn build_element_colors(connectivity: &[[usize; 4]]) -> Vec<Vec<usize>> {
+/// Elements of the same color share no nodes — safe for concurrent writes.
+/// Works for any element size.
+pub fn build_element_colors(connectivity: &[Vec<usize>]) -> Vec<Vec<usize>> {
     let n_elems = connectivity.len();
     let mut node_to_elems: HashMap<usize, Vec<usize>> = HashMap::new();
-    for (elem_idx, &[a, b, c, d]) in connectivity.iter().enumerate() {
-        for &node in &[a, b, c, d] {
+
+    for (elem_idx, nodes) in connectivity.iter().enumerate() {
+        for &node in nodes {
             node_to_elems.entry(node).or_insert_with(Vec::new).push(elem_idx);
         }
     }

@@ -1,6 +1,7 @@
 use nalgebra::{DMatrix, DVector};
 use nalgebra::linalg::LU;
-use crate::assembler::{Assembler, BMatrix};
+use crate::assembler::{Assembler};
+use crate::element::{FiniteElement, FemMesh};
 use crate::boundary::BoundaryConditionResult;
 use crate::material::MaterialLaw;
 use crate::mesh::Mesh;
@@ -51,10 +52,10 @@ impl DenseSolver for DirectSolver {
 /// Use BoundaryConditionResult::reconstruct to get the full displacement vector.
 /// For large meshes, prefer NonlinearSparseSolver (see sparse.rs).
 pub trait NonlinearSolver {
-    fn solve<B: BMatrix>(
+    fn solve<E: FiniteElement>(
         &self,
-        assembler:     &Assembler,
-        mesh:          &Mesh,
+        assembler:     &Assembler<E>,
+        mesh:          &impl FemMesh,
         material:      &dyn MaterialLaw,
         bc_result:     &BoundaryConditionResult,
         linear_solver: &dyn DenseSolver,
@@ -93,10 +94,10 @@ impl Default for NewtonRaphson {
 }
 
 impl NonlinearSolver for NewtonRaphson {
-    fn solve<B: BMatrix>(
+    fn solve<E: FiniteElement>(
         &self,
-        assembler:     &Assembler,
-        mesh:          &Mesh,
+        assembler:     &Assembler<E>,
+        mesh:          &impl FemMesh,
         material:      &dyn MaterialLaw,
         bc_result:     &BoundaryConditionResult,
         linear_solver: &dyn DenseSolver,
@@ -116,7 +117,7 @@ impl NonlinearSolver for NewtonRaphson {
             let u_full = bc_result.reconstruct_ref(&u_reduced, n_full);
 
             // Assemble K_tangent and f_int on the full mesh
-            let k_full     = assembler.assemble_tangent::<B>(mesh, material, &u_full, sim_ctx);
+            let k_full     = assembler.assemble_tangent(mesh, material, &u_full, sim_ctx);
             let f_int_full = assembler.assemble_internal_forces(mesh, material, &u_full, sim_ctx);
 
             // Restrict to free DOFs
@@ -191,10 +192,10 @@ impl Default for NewtonRaphsonCachedK {
 }
 
 impl NonlinearSolver for NewtonRaphsonCachedK {
-    fn solve<B: BMatrix>(
+    fn solve<E: FiniteElement>(
         &self,
-        assembler:     &Assembler,
-        mesh:          &Mesh,
+        assembler:     &Assembler<E>,
+        mesh:          &impl FemMesh,
         material:      &dyn MaterialLaw,
         bc_result:     &BoundaryConditionResult,
         _linear_solver: &dyn DenseSolver,
@@ -207,7 +208,7 @@ impl NonlinearSolver for NewtonRaphsonCachedK {
 
         // Assemble and factorize K once at u=0
         let u_zero = DVector::zeros(n_full);
-        let k_full = assembler.assemble_tangent::<B>(mesh, material, &u_zero, sim_ctx);
+        let k_full = assembler.assemble_tangent(mesh, material, &u_zero, sim_ctx);
         let k_red  = restrict_matrix(&k_full, &bc_result.free_dofs);
         let lu     = LU::new(k_red);
 
@@ -287,16 +288,21 @@ pub fn restrict_vector(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::assembler::{Assembler, LinearBMatrix};
+    use crate::assembler::{Assembler};
     use crate::boundary::{BoundaryConditions, Constraint, EliminationMethod, FixedNode, Load};
     use crate::material::SaintVenantKirchhoff;
+    use crate::element::Tet4;
+    use crate::mesh::Tet4Mesh;
     use crate::mesh::Mesh;
     use nalgebra::Vector3;
+    use crate::element::traits::DofType;
+    const NDOF: usize = <Tet4 as FiniteElement>::Dof::N_DOF;
+    
 
     fn make_bar(nx: usize, ny: usize, nz: usize)
-        -> (Mesh, SaintVenantKirchhoff, Assembler, Vec<usize>)
+        -> (Tet4Mesh, SaintVenantKirchhoff, Assembler<Tet4>, Vec<usize>)
     {
-        let mesh = Mesh::generate(nx, ny, nz, 1.0, 1.0, 1.0);
+        let mesh = Tet4Mesh::generate(nx, ny, nz, 1.0, 1.0, 1.0);
         let mat  = SaintVenantKirchhoff { youngs_modulus: 1e6, poisson_ratio: 0.3, density: 1000.0 };
         let assembler = Assembler::new(&mesh);
         let tips: Vec<usize> = (0..ny).flat_map(|j| {
@@ -306,7 +312,7 @@ mod tests {
     }
 
     fn make_bc_elim(
-        _mesh: &Mesh, nx: usize, ny: usize, nz: usize,
+        _mesh: &impl FemMesh, nx: usize, ny: usize, nz: usize,
         tips: &[usize], force: Vector3<f64>,
     ) -> BoundaryConditions {
         let constraint = Constraint {
@@ -323,15 +329,16 @@ mod tests {
     /// Newton converges to the true SVK solution, not the linearized one.
     #[test]
     fn test_newton_converges_for_svk() {
+        
         let nx = 3; let ny = 2; let nz = 2;
         let (mesh, mat, assembler, tips) = make_bar(nx, ny, nz);
-        let u_zero = DVector::zeros(3 * mesh.nodes.len());
-        let k = assembler.assemble_tangent::<LinearBMatrix>(&mesh, &mat, &u_zero,&SimulationContext::isotropic_static(mesh.elements.len()));
+        let u_zero = DVector::zeros(NDOF * mesh.nodes.len());
+        let k = assembler.assemble_tangent(&mesh, &mat, &u_zero,&SimulationContext::isotropic_static(mesh.elements.len()));
         let bc = make_bc_elim(&mesh, nx, ny, nz, &tips, Vector3::new(1.0, 0.0, 0.0));
-        let bc_result = bc.apply(&k, mesh.nodes.len());
+        let bc_result = bc.apply(&k, mesh.nodes.len(),NDOF);
 
         let newton = NewtonRaphson { max_iter: 20, tol_residual: 1e-8, tol_correction: 1e-8 };
-        let result = newton.solve::<LinearBMatrix>(&assembler, &mesh, &mat, &bc_result, &DirectSolver,&SimulationContext::isotropic_static(mesh.elements.len()));
+        let result = newton.solve(&assembler, &mesh, &mat, &bc_result, &DirectSolver,&SimulationContext::isotropic_static(mesh.elements.len()));
         assert!(result.is_ok(), "Newton must converge for SVK: {:?}", result);
     }
 
@@ -340,13 +347,13 @@ mod tests {
     fn test_cached_k_converges_for_svk() {
         let nx = 3; let ny = 2; let nz = 2;
         let (mesh, mat, assembler, tips) = make_bar(nx, ny, nz);
-        let u_zero = DVector::zeros(3 * mesh.nodes.len());
-        let k = assembler.assemble_tangent::<LinearBMatrix>(&mesh, &mat, &u_zero,&SimulationContext::isotropic_static(mesh.elements.len()));
+        let u_zero = DVector::zeros(NDOF * mesh.nodes.len());
+        let k = assembler.assemble_tangent(&mesh, &mat, &u_zero,&SimulationContext::isotropic_static(mesh.elements.len()));
         let bc = make_bc_elim(&mesh, nx, ny, nz, &tips, Vector3::new(1.0, 0.0, 0.0));
-        let bc_result = bc.apply(&k, mesh.nodes.len());
+        let bc_result = bc.apply(&k, mesh.nodes.len(),NDOF);
 
         let solver = NewtonRaphsonCachedK { max_iter: 20, tol_residual: 1e-8, tol_correction: 1e-8 };
-        let result = solver.solve::<LinearBMatrix>(&assembler, &mesh, &mat, &bc_result, &DirectSolver,&SimulationContext::isotropic_static(mesh.elements.len()));
+        let result = solver.solve(&assembler, &mesh, &mat, &bc_result, &DirectSolver,&SimulationContext::isotropic_static(mesh.elements.len()));
         assert!(result.is_ok(), "CachedK must converge for SVK: {:?}", result);
     }
 
@@ -356,19 +363,19 @@ mod tests {
     fn test_cached_k_matches_newton_for_svk() {
         let nx = 4; let ny = 2; let nz = 2;
         let (mesh, mat, assembler, tips) = make_bar(nx, ny, nz);
-        let u_zero = DVector::zeros(3 * mesh.nodes.len());
-        let k = assembler.assemble_tangent::<LinearBMatrix>(&mesh, &mat, &u_zero,&SimulationContext::isotropic_static(mesh.elements.len()));
+        let u_zero = DVector::zeros(NDOF * mesh.nodes.len());
+        let k = assembler.assemble_tangent(&mesh, &mat, &u_zero,&SimulationContext::isotropic_static(mesh.elements.len()));
 
         let bc1 = make_bc_elim(&mesh, nx, ny, nz, &tips, Vector3::new(10.0, 0.0, 0.0));
-        let bc_result1 = bc1.apply(&k, mesh.nodes.len());
+        let bc_result1 = bc1.apply(&k, mesh.nodes.len(),NDOF);
         let u_newton = NewtonRaphson::default()
-            .solve::<LinearBMatrix>(&assembler, &mesh, &mat, &bc_result1, &DirectSolver,&SimulationContext::isotropic_static(mesh.elements.len()))
+            .solve(&assembler, &mesh, &mat, &bc_result1, &DirectSolver,&SimulationContext::isotropic_static(mesh.elements.len()))
             .unwrap();
 
         let bc2 = make_bc_elim(&mesh, nx, ny, nz, &tips, Vector3::new(10.0, 0.0, 0.0));
-        let bc_result2 = bc2.apply(&k, mesh.nodes.len());
+        let bc_result2 = bc2.apply(&k, mesh.nodes.len(),NDOF);
         let u_cached = NewtonRaphsonCachedK::default()
-            .solve::<LinearBMatrix>(&assembler, &mesh, &mat, &bc_result2, &DirectSolver,&SimulationContext::isotropic_static(mesh.elements.len()))
+            .solve(&assembler, &mesh, &mat, &bc_result2, &DirectSolver,&SimulationContext::isotropic_static(mesh.elements.len()))
             .unwrap();
 
         let error = (&u_newton - &u_cached).norm() / u_newton.norm();
@@ -381,15 +388,15 @@ mod tests {
     fn test_cached_k_satisfies_residual() {
         let nx = 3; let ny = 2; let nz = 2;
         let (mesh, mat, assembler, tips) = make_bar(nx, ny, nz);
-        let u_zero = DVector::zeros(3 * mesh.nodes.len());
-        let k = assembler.assemble_tangent::<LinearBMatrix>(&mesh, &mat, &u_zero,&SimulationContext::isotropic_static(mesh.elements.len()));
+        let u_zero = DVector::zeros(NDOF * mesh.nodes.len());
+        let k = assembler.assemble_tangent(&mesh, &mat, &u_zero,&SimulationContext::isotropic_static(mesh.elements.len()));
         let bc = make_bc_elim(&mesh, nx, ny, nz, &tips, Vector3::new(1.0, 0.0, 0.0));
-        let bc_result = bc.apply(&k, mesh.nodes.len());
+        let bc_result = bc.apply(&k, mesh.nodes.len(),NDOF);
         let n_full = bc_result.n_dofs;
         let f_ext  = bc_result.f.clone();
 
         let u_red = NewtonRaphsonCachedK::default()
-            .solve::<LinearBMatrix>(&assembler, &mesh, &mat, &bc_result, &DirectSolver,&SimulationContext::isotropic_static(mesh.elements.len()))
+            .solve(&assembler, &mesh, &mat, &bc_result, &DirectSolver,&SimulationContext::isotropic_static(mesh.elements.len()))
             .unwrap();
 
         let u_full     = bc_result.reconstruct_ref(&u_red, n_full);
@@ -406,15 +413,15 @@ mod tests {
     fn test_newton_satisfies_residual() {
         let nx = 3; let ny = 2; let nz = 2;
         let (mesh, mat, assembler, tips) = make_bar(nx, ny, nz);
-        let u_zero = DVector::zeros(3 * mesh.nodes.len());
-        let k = assembler.assemble_tangent::<LinearBMatrix>(&mesh, &mat, &u_zero,&SimulationContext::isotropic_static(mesh.elements.len()));
+        let u_zero = DVector::zeros(NDOF * mesh.nodes.len());
+        let k = assembler.assemble_tangent(&mesh, &mat, &u_zero,&SimulationContext::isotropic_static(mesh.elements.len()));
         let bc = make_bc_elim(&mesh, nx, ny, nz, &tips, Vector3::new(1.0, 0.0, 0.0));
-        let bc_result = bc.apply(&k, mesh.nodes.len());
+        let bc_result = bc.apply(&k, mesh.nodes.len(),NDOF);
         let n_full = bc_result.n_dofs;
         let f_ext  = bc_result.f.clone();
 
         let u_newton_red = NewtonRaphson::default()
-            .solve::<LinearBMatrix>(&assembler, &mesh, &mat, &bc_result, &DirectSolver,&SimulationContext::isotropic_static(mesh.elements.len()))
+            .solve(&assembler, &mesh, &mat, &bc_result, &DirectSolver,&SimulationContext::isotropic_static(mesh.elements.len()))
             .unwrap();
 
         // Verify that f_int(u) ~ f_ext

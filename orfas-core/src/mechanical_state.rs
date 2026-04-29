@@ -9,12 +9,13 @@ pub struct MechanicalState {
 impl MechanicalState {
 
     /// Creates a new MechanicalState with all vectors initialized to zero.
-    /// n_nodes is the number of nodes in the mesh — vectors are of size 3*n_nodes (x, y, z per node).
-    pub fn new(n_nodes: usize) -> MechanicalState {
+    // new() — remplacer la signature et les 3 occurrences de 3 *
+    pub fn new(n_dof_per_node: usize, n_nodes: usize) -> MechanicalState {
+        let total = n_dof_per_node * n_nodes;
         MechanicalState {
-            position:     DVector::zeros(3 * n_nodes),
-            velocity:     DVector::zeros(3 * n_nodes),
-            acceleration: DVector::zeros(3 * n_nodes),
+            position:     DVector::zeros(total),
+            velocity:     DVector::zeros(total),
+            acceleration: DVector::zeros(total),
         }
     }
 

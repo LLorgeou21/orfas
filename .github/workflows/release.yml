@@ -1,0 +1,176 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+  BINARY_NAME: orfas-viewer
+
+jobs:
+  # ── Build binaries for each platform ───────────────────────────────────────
+  build:
+    name: Build — ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: orfas-viewer-windows-x86_64.exe
+            binary: target/release/orfas-viewer.exe
+
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: orfas-viewer-linux-x86_64
+            binary: target/release/orfas-viewer
+
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: orfas-viewer-macos-arm64
+            binary: target/release/orfas-viewer
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Linux — install system dependencies for egui/wgpu (windowing + GPU)
+      - name: Install Linux dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev \
+            libssl-dev \
+            libvulkan-dev
+
+      # Cache Cargo registry and build artifacts
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ matrix.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ matrix.os }}-cargo-release-
+
+      - name: Build release binary
+        run: cargo build --release --package orfas-viewer --target ${{ matrix.target }}
+
+      # Rename binary to platform-specific artifact name
+      - name: Rename artifact (Unix)
+        if: matrix.os != 'windows-latest'
+        run: cp ${{ matrix.binary }} ${{ matrix.artifact }}
+
+      - name: Rename artifact (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: Copy-Item "${{ matrix.binary }}" "${{ matrix.artifact }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+          retention-days: 1
+
+  # ── Create GitHub Release and attach binaries ───────────────────────────────
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Download all platform artifacts
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      # Extract version number from tag (v0.8.1 → 0.8.1)
+      - name: Extract version
+        id: meta
+        run: |
+          echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+          echo "tag=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+
+      # Read release notes from CHANGELOG.md if it exists,
+      # otherwise generate a default body from the version tag.
+      - name: Generate release body
+        id: body
+        run: |
+          cat << 'EOF' > release_body.md
+          ## ORFAS ${{ steps.meta.outputs.tag }}
+
+          Nonlinear FEM engine for soft tissue and surgical simulation.
+
+          ### Download
+
+          | Platform | File |
+          |---|---|
+          | Windows (x86_64) | `orfas-viewer-windows-x86_64.exe` |
+          | Linux (x86_64) | `orfas-viewer-linux-x86_64` |
+          | macOS (Apple Silicon) | `orfas-viewer-macos-arm64` |
+
+          ### Quick start
+
+          **Windows:** double-click `orfas-viewer-windows-x86_64.exe`
+
+          **Linux:**
+          ```bash
+          chmod +x orfas-viewer-linux-x86_64
+          ./orfas-viewer-linux-x86_64
+          ```
+
+          **macOS:**
+          ```bash
+          chmod +x orfas-viewer-macos-arm64
+          ./orfas-viewer-macos-arm64
+          ```
+
+          > Requires an up-to-date GPU driver. No other dependencies.
+
+          ### What's included
+
+          - Interactive FEM simulation viewer (egui + wgpu)
+          - Static and dynamic nonlinear simulation
+          - Material library: SVK, Neo-Hookean, Mooney-Rivlin, Ogden, Holzapfel-Ogden, Viscoelastic
+          - Elements: Tet4, Tet10, Hex8, Beam2, Shell4 (MITC4)
+          - Rayleigh damping, implicit Euler integrator
+          - Sparse parallel assembly
+
+          See [VALIDATION.md](https://github.com/${{ github.repository }}/blob/master/VALIDATION.md)
+          for numerical benchmarks and [README.md](https://github.com/${{ github.repository }}/blob/master/README.md)
+          for full documentation.
+          EOF
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ORFAS ${{ steps.meta.outputs.tag }}
+          body_path: release_body.md
+          draft: false
+          prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
+          files: |
+            artifacts/orfas-viewer-windows-x86_64.exe/orfas-viewer-windows-x86_64.exe
+            artifacts/orfas-viewer-linux-x86_64/orfas-viewer-linux-x86_64
+            artifacts/orfas-viewer-macos-arm64/orfas-viewer-macos-arm64

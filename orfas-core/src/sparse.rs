@@ -8,11 +8,12 @@
 //   - CgSolver         : drop-in replacement for DirectSolver on large systems
 //   - NewtonRaphsonSparse : drop-in replacement for NewtonRaphson using sparse assembly
 
-use crate::assembler::{Assembler, BMatrix};
+use crate::assembler::{Assembler};
 use crate::boundary::BoundaryConditionResult;
 use crate::material::MaterialLaw;
 use crate::material::SimulationContext;
 use crate::mesh::Mesh;
+use crate::element::{FiniteElement, FemMesh};
 use crate::solver::{restrict_vector, SolverError};
 use nalgebra::{DVector};
 use nalgebra_sparse::{CooMatrix, CsrMatrix};
@@ -124,9 +125,9 @@ impl SparseSolver for CgSolver {
 /// Strategy trait for sparse tangent assembly.
 /// Allows NewtonRaphsonSparse to be generic over sequential vs parallel assembly.
 pub trait SparseAssemblyStrategy {
-    fn assemble_tangent<B: BMatrix>(
-        assembler:   &Assembler,
-        mesh:        &Mesh,
+    fn assemble_tangent<E: FiniteElement>(
+        assembler:   &Assembler<E>,
+        mesh:        &impl FemMesh,
         material:    &dyn MaterialLaw,
         u:           &DVector<f64>,
         sim_ctx: &SimulationContext,
@@ -141,26 +142,26 @@ pub struct Sequential;
 pub struct Parallel;
 
 impl SparseAssemblyStrategy for Sequential {
-    fn assemble_tangent<B: BMatrix>(
-        assembler: &Assembler,
-        mesh:      &Mesh,
+    fn assemble_tangent<E: FiniteElement>(
+        assembler: &Assembler<E>,
+        mesh:      &impl FemMesh,
         material:  &dyn MaterialLaw,
         u:         &DVector<f64>,
         sim_ctx: &SimulationContext,
     ) -> CsrMatrix<f64> {
-        assembler.assemble_tangent_sparse::<B>(mesh, material, u, sim_ctx)
+        assembler.assemble_tangent_sparse(mesh, material, u, sim_ctx)
     }
 }
 
 impl SparseAssemblyStrategy for Parallel {
-    fn assemble_tangent<B: BMatrix>(
-        assembler: &Assembler,
-        mesh:      &Mesh,
+    fn assemble_tangent<E: FiniteElement>(
+        assembler: &Assembler<E>,
+        mesh:      &impl FemMesh,
         material:  &dyn MaterialLaw,
         u:         &DVector<f64>,
         sim_ctx: &SimulationContext,
     ) -> CsrMatrix<f64> {
-        assembler.assemble_tangent_sparse_parallel::<B>(mesh, material, u,sim_ctx)
+        assembler.assemble_tangent_sparse_parallel(mesh, material, u,sim_ctx)
     }
 }
 
@@ -205,10 +206,10 @@ pub fn restrict_matrix_sparse(
 ///
 /// Mirror of NonlinearSolver but uses assemble_tangent_sparse internally.
 pub trait NonlinearSparseSolver {
-    fn solve<B: BMatrix>(
+    fn solve<E: FiniteElement>(
         &self,
-        assembler:     &Assembler,
-        mesh:          &Mesh,
+        assembler:     &Assembler<E>,
+        mesh:          &impl FemMesh,
         material:      &dyn MaterialLaw,
         bc_result:     &BoundaryConditionResult,
         linear_solver: &dyn SparseSolver,
@@ -251,10 +252,10 @@ impl<S: SparseAssemblyStrategy> Default for NewtonRaphsonSparse<S> {
 }
 
 impl<S: SparseAssemblyStrategy> NonlinearSparseSolver for NewtonRaphsonSparse<S> {
-    fn solve<B: BMatrix>(
+    fn solve<E: FiniteElement>(
         &self,
-        assembler:     &Assembler,
-        mesh:          &Mesh,
+        assembler:     &Assembler<E>,
+        mesh:          &impl FemMesh,
         material:      &dyn MaterialLaw,
         bc_result:     &BoundaryConditionResult,
         linear_solver: &dyn SparseSolver,
@@ -269,7 +270,7 @@ impl<S: SparseAssemblyStrategy> NonlinearSparseSolver for NewtonRaphsonSparse<S>
         for _iter in 0..self.max_iter {
             let u_full = bc_result.reconstruct_ref(&u_reduced, n_full);
 
-            let k_full     = S::assemble_tangent::<B>(assembler, mesh, material, &u_full, sim_ctx);
+            let k_full     = S::assemble_tangent(assembler, mesh, material, &u_full, sim_ctx);
             let f_int_full = assembler.assemble_internal_forces(mesh, material, &u_full, sim_ctx);
 
             let k_red     = restrict_matrix_sparse(&k_full,     &bc_result.free_dofs);
@@ -437,24 +438,29 @@ fn backward_substitution(u: &CsrMatrix<f64>, y: &DVector<f64>) -> DVector<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::assembler::{Assembler, LinearBMatrix};
+    use crate::assembler::{Assembler};
     use crate::boundary::{BoundaryConditions, Constraint, EliminationMethod, FixedNode, Load};
     use crate::material::SaintVenantKirchhoff;
     use crate::mesh::Mesh;
     use crate::solver::{DirectSolver, NewtonRaphson, NonlinearSolver};
     use nalgebra::{DVector, Vector3};
+    use crate::element::{FiniteElement, FemMesh};
+    use crate::element::Tet4;
+    use crate::element::traits::DofType;
+    const NDOF: usize = <Tet4 as FiniteElement>::Dof::N_DOF;
+    use crate::mesh::Tet4Mesh;
 
     /// NewtonRaphsonSparse + CgSolver must match NewtonRaphson + DirectSolver
     /// within numerical tolerance. Validates both sparse assembly and CG solve.
     #[test]
     fn test_newton_sparse_matches_dense() {
         let nx = 3; let ny = 2; let nz = 2;
-        let mesh = Mesh::generate(nx, ny, nz, 1.0, 1.0, 1.0);
+        let mesh = Tet4Mesh::generate(nx, ny, nz, 1.0, 1.0, 1.0);
         let mat  = SaintVenantKirchhoff { youngs_modulus: 1e6, poisson_ratio: 0.3, density: 1000.0 };
-        let assembler = Assembler::new(&mesh);
+        let assembler = Assembler::<Tet4>::new(&mesh);
 
         let u_zero = DVector::zeros(3 * mesh.nodes.len());
-        let k = assembler.assemble_tangent::<LinearBMatrix>(&mesh, &mat, &u_zero,&SimulationContext::isotropic_static(mesh.elements.len()));
+        let k = assembler.assemble_tangent(&mesh, &mat, &u_zero,&SimulationContext::isotropic_static(mesh.elements.len()));
 
         let tips: Vec<usize> = (0..ny).flat_map(|j| {
             (0..nz).map(move |k| (nx - 1) + j * nx + k * nx * ny)
@@ -467,21 +473,21 @@ mod tests {
         };
         let load = Load { list: tips.clone(), force: Vector3::new(1.0, 0.0, 0.0) };
         let bc = BoundaryConditions::new(constraint, vec![load], Box::new(EliminationMethod));
-        let bc_result = bc.apply(&k, mesh.nodes.len());
+        let bc_result = bc.apply(&k, mesh.nodes.len(),NDOF);
 
         let u_dense = NewtonRaphson::default()
-            .solve::<LinearBMatrix>(&assembler, &mesh, &mat, &bc_result, &DirectSolver,&SimulationContext::isotropic_static(mesh.elements.len()))
+            .solve(&assembler, &mesh, &mat, &bc_result, &DirectSolver,&SimulationContext::isotropic_static(mesh.elements.len()))
             .unwrap();
 
         let u_sparse = NewtonRaphsonSparse::<Sequential>::default()
-            .solve::<LinearBMatrix>(&assembler, &mesh, &mat, &bc_result, &CgSolver::default(),&SimulationContext::isotropic_static(mesh.elements.len()))
+            .solve(&assembler, &mesh, &mat, &bc_result, &CgSolver::default(),&SimulationContext::isotropic_static(mesh.elements.len()))
             .unwrap();
 
         let diff = (&u_dense - &u_sparse).norm() / u_dense.norm();
         assert!(diff < 1e-6, "sparse != dense, diff = {:.2e}", diff);
 
         let u_sparse_par = NewtonRaphsonSparse::<Parallel>::default()
-            .solve::<LinearBMatrix>(&assembler, &mesh, &mat, &bc_result, &CgSolver::default(),&SimulationContext::isotropic_static(mesh.elements.len()))
+            .solve(&assembler, &mesh, &mat, &bc_result, &CgSolver::default(),&SimulationContext::isotropic_static(mesh.elements.len()))
             .unwrap();
 
         let diff = (&u_dense - &u_sparse_par).norm() / u_dense.norm();
@@ -494,12 +500,12 @@ mod tests {
     #[test]
     fn test_cg_ilu_matches_identity() {
         let nx = 3; let ny = 2; let nz = 2;
-        let mesh = Mesh::generate(nx, ny, nz, 1.0, 1.0, 1.0);
+        let mesh = Tet4Mesh::generate(nx, ny, nz, 1.0, 1.0, 1.0);
         let mat  = SaintVenantKirchhoff { youngs_modulus: 1e6, poisson_ratio: 0.3, density: 1000.0 };
-        let assembler = Assembler::new(&mesh);
+        let assembler = Assembler::<Tet4>::new(&mesh);
 
         let u_zero = DVector::zeros(3 * mesh.nodes.len());
-        let k = assembler.assemble_tangent::<LinearBMatrix>(&mesh, &mat, &u_zero,&SimulationContext::isotropic_static(mesh.elements.len()));
+        let k = assembler.assemble_tangent(&mesh, &mat, &u_zero,&SimulationContext::isotropic_static(mesh.elements.len()));
 
         let tips: Vec<usize> = (0..ny).flat_map(|j| {
             (0..nz).map(move |k| (nx - 1) + j * nx + k * nx * ny)
@@ -512,16 +518,16 @@ mod tests {
         };
         let load = Load { list: tips.clone(), force: Vector3::new(1.0, 0.0, 0.0) };
         let bc = BoundaryConditions::new(constraint, vec![load], Box::new(EliminationMethod));
-        let bc_result = bc.apply(&k, mesh.nodes.len());
+        let bc_result = bc.apply(&k, mesh.nodes.len(),NDOF);
 
 
         let cgsolver : CgSolver = CgSolver { max_iter: 1000, tolerance: 1e-8, precond: Preconditioner::Ilu(0) };
         let u_sparse_ilu0 = NewtonRaphsonSparse::<Sequential>::default()
-            .solve::<LinearBMatrix>(&assembler, &mesh, &mat, &bc_result, &cgsolver,&SimulationContext::isotropic_static(mesh.elements.len()))
+            .solve(&assembler, &mesh, &mat, &bc_result, &cgsolver,&SimulationContext::isotropic_static(mesh.elements.len()))
             .unwrap();
 
         let u_sparse = NewtonRaphsonSparse::<Sequential>::default()
-            .solve::<LinearBMatrix>(&assembler, &mesh, &mat, &bc_result, &CgSolver::default(),&SimulationContext::isotropic_static(mesh.elements.len()))
+            .solve(&assembler, &mesh, &mat, &bc_result, &CgSolver::default(),&SimulationContext::isotropic_static(mesh.elements.len()))
             .unwrap();
 
         let diff = (&u_sparse_ilu0 - &u_sparse).norm() / u_sparse_ilu0.norm();

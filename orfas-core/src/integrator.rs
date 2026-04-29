@@ -1,10 +1,9 @@
 use nalgebra::{DMatrix, DVector};
-use crate::assembler::{Assembler, BMatrix, LinearBMatrix};
+use crate::assembler::Assembler;
 use crate::boundary::BoundaryConditionResult;
-use crate::material::MaterialLaw;
+use crate::element::{FiniteElement, FemMesh};
+use crate::material::{MaterialLaw, SimulationContext};
 use crate::mechanical_state::MechanicalState;
-use crate::mesh::Mesh;
-use crate::material::SimulationContext;
 use crate::solver::{restrict_matrix, restrict_vector, DenseSolver, SolverError};
 
 // ─── Trait ────────────────────────────────────────────────────────────────────
@@ -30,15 +29,15 @@ use crate::solver::{restrict_matrix, restrict_vector, DenseSolver, SolverError};
 /// - bc_result    : boundary condition result — used to map reduced <-> full
 /// - linear_solver: solves the linear system at each Newton iteration
 pub trait IntegratorMethod {
-    fn step<B: BMatrix>(
+    fn step<E: FiniteElement>(
         &self,
         state:          &mut MechanicalState,
         mass:           &DVector<f64>,
         c:              &DMatrix<f64>,
         f_ext:          &DVector<f64>,
         dt:             f64,
-        assembler:      &Assembler,
-        mesh:           &Mesh,
+        assembler:      &Assembler<E>,
+        mesh:           &impl FemMesh,
         material:       &dyn MaterialLaw,
         bc_result:      &BoundaryConditionResult,
         linear_solver:  &dyn DenseSolver,
@@ -86,15 +85,15 @@ impl Default for ImplicitEulerIntegrator {
 
 impl IntegratorMethod for ImplicitEulerIntegrator {
 
-    fn step<B: BMatrix>(
+    fn step<E: FiniteElement>(
         &self,
         state:         &mut MechanicalState,
         mass:          &DVector<f64>,
         c:             &DMatrix<f64>,
         f_ext:         &DVector<f64>,
         dt:            f64,
-        assembler:     &Assembler,
-        mesh:          &Mesh,
+        assembler:     &Assembler<E>,
+        mesh:          &impl FemMesh,
         material:      &dyn MaterialLaw,
         bc_result:     &BoundaryConditionResult,
         linear_solver: &dyn DenseSolver,
@@ -128,9 +127,9 @@ impl IntegratorMethod for ImplicitEulerIntegrator {
             let u_next_full = bc_result.reconstruct_ref(&u_next_red, n_full);
 
             // Assemble K_tangent and f_int on the full mesh
-            let mut sim_ctx = &SimulationContext::isotropic_static(mesh.elements.len());
-            let k_full     = assembler.assemble_tangent::<B>(mesh, material, &u_next_full,&sim_ctx);
-            let f_int_full = assembler.assemble_internal_forces(mesh, material, &u_next_full,sim_ctx);
+            let mut sim_ctx = SimulationContext::isotropic_static(mesh.n_elements());
+            let k_full     = assembler.assemble_tangent(mesh, material, &u_next_full,&sim_ctx);
+            let f_int_full = assembler.assemble_internal_forces(mesh, material, &u_next_full,&sim_ctx);
 
             // Restrict K_tangent and f_int to free DOFs
             let k_red     = restrict_matrix(&k_full,     &bc_result.free_dofs);
@@ -188,24 +187,32 @@ mod tests {
     use crate::material::SaintVenantKirchhoff;
     use crate::mesh::Mesh;
     use nalgebra::Vector3;
+    use crate::element::Tet4;
+    use crate::element::FiniteElement;
+    use crate::element::traits::DofType;
+    use crate::mesh::Tet4Mesh;
 
     /// With strong damping, the dynamic simulation must converge
     /// to the static solution (same benchmark as v0.3 but with SVK).
     #[test]
     fn test_implicit_euler_converges_to_static() {
+        
         let nx = 5; let ny = 2; let nz = 2;
-        let mesh = Mesh::generate(nx, ny, nz, 1.0, 1.0, 1.0);
+        let mesh = Tet4Mesh::generate(nx, ny, nz, 1.0, 1.0, 1.0);
         let mat  = SaintVenantKirchhoff {
             youngs_modulus: 1e6,
             poisson_ratio:  0.3,
             density:        1000.0,
         };
-        let assembler = Assembler::new(&mesh);
+        let assembler = Assembler::<Tet4>::new(&mesh);
+
+        // Number of DOFs per node for this element type.
+        const NDOF: usize = <Tet4 as FiniteElement>::Dof::N_DOF;
 
         let tip_nodes: Vec<usize> = (0..ny).flat_map(|j| {
             (0..nz).map(move |k| (nx - 1) + j * nx + k * nx * ny)
         }).collect();
-        let nb_tip = tip_nodes.len() as f64;
+        let nb_tip  = tip_nodes.len() as f64;
         let f_total = 100.0;
 
         let make_bc = || {
@@ -221,28 +228,28 @@ mod tests {
             BoundaryConditions::new(constraint, vec![load], Box::new(EliminationMethod))
         };
 
-        // Reference statique via Newton
-        let bc_static = make_bc();
-        let u_zero = DVector::zeros(3 * mesh.nodes.len());
-        let sim_ctx = &SimulationContext::isotropic_static(mesh.elements.len());
-        let k_ref = assembler.assemble_tangent::<LinearBMatrix>(&mesh, &mat, &u_zero,&sim_ctx);
-        let bc_result_static = bc_static.apply(&k_ref, mesh.nodes.len());
+        // Static reference solution via direct solver
+        let bc_static  = make_bc();
+        let u_zero     = DVector::zeros(NDOF * mesh.nodes.len());
+        let sim_ctx    = &SimulationContext::isotropic_static(mesh.elements.len());
+        let k_ref      = assembler.assemble_tangent(&mesh, &mat, &u_zero, &sim_ctx);
+        let bc_result_static = bc_static.apply(&k_ref, mesh.nodes.len(), NDOF);
         let u_static_red = crate::solver::DirectSolver
             .solve(&bc_result_static.k, &bc_result_static.f).unwrap();
-        let u_static = bc_result_static.reconstruct(u_static_red);
+        let u_static   = bc_result_static.reconstruct(u_static_red);
         let mean_static = tip_nodes.iter()
-            .map(|&i| u_static[3 * i]).sum::<f64>() / nb_tip;
+            .map(|&i| u_static[NDOF * i]).sum::<f64>() / nb_tip;
 
-        // Simulation dynamique
-        let k_full = assembler.assemble_tangent::<LinearBMatrix>(&mesh, &mat, &u_zero,&sim_ctx);
-        let mass   = assembler.assemble_mass(&mesh, &mat);
+        // Dynamic simulation
+        let k_full  = assembler.assemble_tangent(&mesh, &mat, &u_zero, &sim_ctx);
+        let mass    = assembler.assemble_mass(&mesh, &mat);
         let damping = RayleighDamping { alpha: 10.0, beta: 0.01 };
         let c_full  = damping.compute(&mass, &k_full);
 
-        let bc_dyn = make_bc();
-        let bc_result_dyn = bc_dyn.apply(&k_full, mesh.nodes.len());
+        let bc_dyn        = make_bc();
+        let bc_result_dyn = bc_dyn.apply(&k_full, mesh.nodes.len(), NDOF);
+        let f_ext         = bc_result_dyn.f.clone();
 
-        let f_ext = bc_result_dyn.f.clone();
         let (mass_red, c_red) = match &bc_result_dyn.free_dofs {
             Some(free) => {
                 let m = DVector::from_iterator(free.len(), free.iter().map(|&i| mass[i]));
@@ -254,13 +261,13 @@ mod tests {
             None => (mass.clone(), c_full.clone()),
         };
 
-        let n_red = mass_red.len();
-        let mut state = MechanicalState::new(n_red / 3);
+        let n_red      = mass_red.len();
+        let mut state  = MechanicalState::new(NDOF, n_red / NDOF);
         let integrator = ImplicitEulerIntegrator::default();
-        let solver = crate::solver::DirectSolver;
+        let solver     = crate::solver::DirectSolver;
 
         for _ in 0..500 {
-            integrator.step::<LinearBMatrix>(
+            integrator.step(
                 &mut state, &mass_red, &c_red, &f_ext, 1.0,
                 &assembler, &mesh, &mat, &bc_result_dyn, &solver,
             ).unwrap();
@@ -268,11 +275,11 @@ mod tests {
 
         let mean_dyn = match &bc_result_dyn.free_dofs {
             Some(free) => tip_nodes.iter().map(|&idx| {
-                free.iter().position(|&d| d == 3 * idx)
+                free.iter().position(|&d| d == NDOF * idx)
                     .map(|j| state.position[j])
                     .unwrap_or(0.0)
             }).sum::<f64>() / nb_tip,
-            None => tip_nodes.iter().map(|&i| state.position[3 * i]).sum::<f64>() / nb_tip,
+            None => tip_nodes.iter().map(|&i| state.position[NDOF * i]).sum::<f64>() / nb_tip,
         };
 
         let error = (mean_dyn - mean_static).abs() / mean_static;
@@ -280,6 +287,8 @@ mod tests {
             "dynamic={:.8} static={:.8} error={:.4}%",
             mean_dyn, mean_static, error * 100.0
         );
-        assert!(error < 0.01, "Dynamic simulation must converge to static solution: {:.4}%", error * 100.0);
+        assert!(error < 0.01,
+            "Dynamic simulation must converge to static solution: {:.4}%", error * 100.0);
     }
+
 }

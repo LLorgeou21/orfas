@@ -5,86 +5,76 @@ use nalgebra::{DMatrix, DVector};
 use nalgebra_sparse::CsrMatrix;
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicU64, Ordering};
+use crate::element::{FiniteElement, FemMesh};
+use crate::element::traits::DofType;
 use crate::material::{MaterialLaw, SimulationContext};
-use crate::mesh::Mesh;
 use super::Assembler;
-use super::geometry::{BMatrix, compute_deformation_gradient};
+use nalgebra::Vector3;
 
-impl Assembler {
-    /// Assembles the dense tangent stiffness matrix K = sum_e Bt * C * B * V.
-    pub fn assemble_tangent<B: BMatrix>(
+impl<E: FiniteElement> Assembler<E> {
+
+    /// Assembles the dense tangent stiffness matrix.
+    /// K = sum_e sum_g B(g)^T * C(F(g)) * B(g) * det_J(g) * w(g)
+    /// Loops over elements then over Gauss points within each element.
+    /// Matrix size is (N_DOF * n_nodes) x (N_DOF * n_nodes) where
+    /// N_DOF = E::Dof::N_DOF (3 for volumetric, 6 for structural elements).
+    pub fn assemble_tangent(
         &self,
-        mesh:     &Mesh,
+        mesh:     &impl FemMesh,
         material: &dyn MaterialLaw,
         u:        &DVector<f64>,
         sim_ctx:  &SimulationContext,
     ) -> DMatrix<f64> {
-        let n = 3 * mesh.nodes.len();
-        let mut k = DMatrix::zeros(n, n);
+        let ndof = <E::Dof as DofType>::N_DOF;
+        let n            = ndof * mesh.n_nodes();
+        let mut k        = DMatrix::zeros(n, n);
+        let gauss_points = E::integration_points();
 
-        for (elem_idx, &[a, b, c, d]) in self.connectivity.iter().enumerate() {
+        for (elem_idx, nodes) in self.connectivity.iter().enumerate() {
             let geo = &self.geometry[elem_idx];
-            if geo.volume < 1e-10 { continue; }
 
-            let u0 = Self::node_displacement(u, a);
-            let u1 = Self::node_displacement(u, b);
-            let u2 = Self::node_displacement(u, c);
-            let u3 = Self::node_displacement(u, d);
-
-            let f_grad = compute_deformation_gradient(&u0, &u1, &u2, &u3, &geo.b, &geo.c, &geo.d);
-            let b_mat  = B::compute(&geo.b, &geo.c, &geo.d, geo.volume, &f_grad);
-            let ctx    = sim_ctx.material_context_for(elem_idx);
-            let c_mat  = material.tangent_stiffness(&f_grad, &ctx);
-            let ke     = b_mat.transpose() * c_mat * b_mat * geo.volume;
-
-            let global_indices = [a, b, c, d];
-            for r in 0..4 {
-                for s in 0..4 {
-                    let mut block = k.fixed_view_mut::<3, 3>(3 * global_indices[r], 3 * global_indices[s]);
-                    block += ke.fixed_view::<3, 3>(3 * r, 3 * s);
+            // Analytical stiffness path (Beam2, Shell): bypass Gauss loop.
+            let node_positions: Vec<Vector3<f64>> = nodes.iter()
+                .map(|&i| mesh.nodes()[i].position)
+                .collect();
+            if let Some(ke) = E::element_stiffness(&node_positions, material) {
+                for r in 0..E::N_NODES {
+                    for s in 0..E::N_NODES {
+                        let gr = nodes[r];
+                        let gs = nodes[s];
+                        for dr in 0..ndof {
+                            for dc in 0..ndof {
+                                k[(ndof * gr + dr, ndof * gs + dc)]
+                                    += ke[(ndof * r + dr, ndof * s + dc)];
+                            }
+                        }
+                    }
                 }
+                continue;
             }
-        }
-        k
-    }
 
-    /// Assembles the sparse tangent stiffness matrix (sequential).
-    pub fn assemble_tangent_sparse<B: BMatrix>(
-        &self,
-        mesh:     &Mesh,
-        material: &dyn MaterialLaw,
-        u:        &DVector<f64>,
-        sim_ctx:  &SimulationContext,
-    ) -> CsrMatrix<f64> {
-        let mut k = self.csr_pattern.clone();
-        let values = k.values_mut();
-        for v in values.iter_mut() { *v = 0.0; }
+            let displacements: Vec<_> = nodes.iter()
+                .map(|&i| Self::node_displacement(u, i))
+                .collect();
 
-        for (elem_idx, &[a, b, c, d]) in self.connectivity.iter().enumerate() {
-            let geo = &self.geometry[elem_idx];
-            if geo.volume < 1e-10 { continue; }
+            for (g_idx, (_xi, weight)) in gauss_points.iter().enumerate() {
+                let grad_n = E::shape_gradients(geo, g_idx);
+                let f_grad = E::deformation_gradient(&grad_n, &displacements);
+                let b_mat  = E::b_matrix(&grad_n, &f_grad);
+                let det_j  = E::gauss_det_j(geo, g_idx);
+                let ctx    = sim_ctx.material_context_for(elem_idx);
+                let c_mat  = material.tangent_stiffness(&f_grad, &ctx);
+                let ke     = b_mat.transpose() * c_mat * &b_mat * det_j * *weight;
 
-            let u0 = Self::node_displacement(u, a);
-            let u1 = Self::node_displacement(u, b);
-            let u2 = Self::node_displacement(u, c);
-            let u3 = Self::node_displacement(u, d);
-
-            let f_grad = compute_deformation_gradient(&u0, &u1, &u2, &u3, &geo.b, &geo.c, &geo.d);
-            let b_mat  = B::compute(&geo.b, &geo.c, &geo.d, geo.volume, &f_grad);
-            let ctx    = sim_ctx.material_context_for(elem_idx);
-            let c_mat  = material.tangent_stiffness(&f_grad, &ctx);
-            let ke     = b_mat.transpose() * c_mat * b_mat * geo.volume;
-
-            let global_indices = [a, b, c, d];
-            for r in 0..4 {
-                for s in 0..4 {
-                    let block = ke.fixed_view::<3, 3>(3 * r, 3 * s);
-                    for dr in 0..3 {
-                        for dc in 0..3 {
-                            let i   = 3 * global_indices[r] + dr;
-                            let j   = 3 * global_indices[s] + dc;
-                            let idx = self.entry_map[&(i, j)];
-                            values[idx] += block[(dr, dc)];
+                for r in 0..E::N_NODES {
+                    for s in 0..E::N_NODES {
+                        let gr = nodes[r];
+                        let gs = nodes[s];
+                        for dr in 0..ndof {
+                            for dc in 0..ndof {
+                                k[(ndof * gr + dr, ndof * gs + dc)]
+                                    += ke[(ndof * r + dr, ndof * s + dc)];
+                            }
                         }
                     }
                 }
@@ -93,53 +83,160 @@ impl Assembler {
         k
     }
 
-    /// Assembles the sparse tangent stiffness matrix (parallel, atomic).
-    pub fn assemble_tangent_sparse_parallel<B: BMatrix>(
+    /// Assembles the sparse tangent stiffness matrix (sequential).
+    /// Scatters element contributions into the pre-built CSR pattern
+    /// via entry_map for O(1) index lookup per entry.
+    pub fn assemble_tangent_sparse(
         &self,
-        mesh:     &Mesh,
+        mesh:     &impl FemMesh,
         material: &dyn MaterialLaw,
         u:        &DVector<f64>,
         sim_ctx:  &SimulationContext,
     ) -> CsrMatrix<f64> {
-        let mut k = self.csr_pattern.clone();
-        let n_vals = k.values().len();
+        let ndof = <E::Dof as DofType>::N_DOF;
+        let mut k      = self.csr_pattern.clone();
+        let values     = k.values_mut();
+        for v in values.iter_mut() { *v = 0.0; }
+
+        let gauss_points = E::integration_points();
+
+        for (elem_idx, nodes) in self.connectivity.iter().enumerate() {
+            let geo = &self.geometry[elem_idx];
+
+            // Analytical stiffness path (Beam2, Shell): bypass Gauss loop.
+            let node_positions: Vec<Vector3<f64>> = nodes.iter()
+                .map(|&i| mesh.nodes()[i].position)
+                .collect();
+            if let Some(ke) = E::element_stiffness(&node_positions, material) {
+                for r in 0..E::N_NODES {
+                    for s in 0..E::N_NODES {
+                        let gr = nodes[r];
+                        let gs = nodes[s];
+                        for dr in 0..ndof {
+                            for dc in 0..ndof {
+                                let i   = ndof * gr + dr;
+                                let j   = ndof * gs + dc;
+                                let idx = self.entry_map[&(i, j)];
+                                values[idx] += ke[(ndof * r + dr, ndof * s + dc)];
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+
+            let displacements: Vec<_> = nodes.iter()
+                .map(|&i| Self::node_displacement(u, i))
+                .collect();
+
+            for (g_idx, (_xi, weight)) in gauss_points.iter().enumerate() {
+                let grad_n = E::shape_gradients(geo, g_idx);
+                let f_grad = E::deformation_gradient(&grad_n, &displacements);
+                let b_mat  = E::b_matrix(&grad_n, &f_grad);
+                let det_j  = E::gauss_det_j(geo, g_idx);
+                let ctx    = sim_ctx.material_context_for(elem_idx);
+                let c_mat  = material.tangent_stiffness(&f_grad, &ctx);
+                let ke     = b_mat.transpose() * c_mat * &b_mat * det_j * *weight;
+
+                for r in 0..E::N_NODES {
+                    for s in 0..E::N_NODES {
+                        let gr = nodes[r];
+                        let gs = nodes[s];
+                        for dr in 0..ndof {
+                            for dc in 0..ndof {
+                                let i   = ndof * gr + dr;
+                                let j   = ndof * gs + dc;
+                                let idx = self.entry_map[&(i, j)];
+                                values[idx] += ke[(ndof * r + dr, ndof * s + dc)];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        k
+    }
+
+    /// Assembles the sparse tangent stiffness matrix (parallel, lock-free atomic).
+    /// Each thread accumulates into AtomicU64 via bit-cast f64 addition.
+    /// Requires E::Geometry: Sync (guaranteed by ElementGeometry: Sync).
+    pub fn assemble_tangent_sparse_parallel(
+        &self,
+        mesh:     &(impl FemMesh + Sync),
+        material: &(dyn MaterialLaw + Sync),
+        u:        &DVector<f64>,
+        sim_ctx:  &SimulationContext,
+    ) -> CsrMatrix<f64> {
+        let ndof = <E::Dof as DofType>::N_DOF;
+        let mut k      = self.csr_pattern.clone();
+        let n_vals     = k.values().len();
 
         let atomic_values: Vec<AtomicU64> = (0..n_vals)
             .map(|_| AtomicU64::new(0u64))
             .collect();
 
+        let gauss_points = E::integration_points();
+
         self.connectivity
             .par_iter()
             .enumerate()
-            .for_each(|(elem_idx, &[a, b, c, d])| {
+            .for_each(|(elem_idx, nodes)| {
                 let geo = &self.geometry[elem_idx];
-                if geo.volume < 1e-10 { return; }
 
-                let u0 = Self::node_displacement(u, a);
-                let u1 = Self::node_displacement(u, b);
-                let u2 = Self::node_displacement(u, c);
-                let u3 = Self::node_displacement(u, d);
+                // Analytical stiffness path (Beam2, Shell): bypass Gauss loop.
+                let node_positions: Vec<Vector3<f64>> = nodes.iter()
+                    .map(|&i| mesh.nodes()[i].position)
+                    .collect();
+                if let Some(ke) = E::element_stiffness(&node_positions, material) {
+                    for r in 0..E::N_NODES {
+                        for s in 0..E::N_NODES {
+                            let gr = nodes[r];
+                            let gs = nodes[s];
+                            for dr in 0..ndof {
+                                for dc in 0..ndof {
+                                    let i   = ndof * gr + dr;
+                                    let j   = ndof * gs + dc;
+                                    let idx = self.entry_map[&(i, j)];
+                                    let v   = ke[(ndof * r + dr, ndof * s + dc)];
+                                    atomic_values[idx].fetch_update(
+                                        Ordering::Relaxed, Ordering::Relaxed,
+                                        |old| Some((f64::from_bits(old) + v).to_bits()),
+                                    ).unwrap();
+                                }
+                            }
+                        }
+                    }
+                    return;
+                }
 
-                let f_grad = compute_deformation_gradient(&u0, &u1, &u2, &u3, &geo.b, &geo.c, &geo.d);
-                let b_mat  = B::compute(&geo.b, &geo.c, &geo.d, geo.volume, &f_grad);
-                let ctx    = sim_ctx.material_context_for(elem_idx);
-                let c_mat  = material.tangent_stiffness(&f_grad, &ctx);
-                let ke     = b_mat.transpose() * c_mat * b_mat * geo.volume;
+                let displacements: Vec<_> = nodes.iter()
+                    .map(|&i| Self::node_displacement(u, i))
+                    .collect();
 
-                let global_indices = [a, b, c, d];
-                for r in 0..4 {
-                    for s in 0..4 {
-                        let block = ke.fixed_view::<3, 3>(3 * r, 3 * s);
-                        for dr in 0..3 {
-                            for dc in 0..3 {
-                                let i   = 3 * global_indices[r] + dr;
-                                let j   = 3 * global_indices[s] + dc;
-                                let idx = self.entry_map[&(i, j)];
-                                let v   = block[(dr, dc)];
-                                atomic_values[idx].fetch_update(
-                                    Ordering::Relaxed, Ordering::Relaxed,
-                                    |old| Some((f64::from_bits(old) + v).to_bits()),
-                                ).unwrap();
+                for (g_idx, (_xi, weight)) in gauss_points.iter().enumerate() {
+                    let grad_n = E::shape_gradients(geo, g_idx);
+                    let f_grad = E::deformation_gradient(&grad_n, &displacements);
+                    let b_mat  = E::b_matrix(&grad_n, &f_grad);
+                    let det_j  = E::gauss_det_j(geo, g_idx);
+                    let ctx    = sim_ctx.material_context_for(elem_idx);
+                    let c_mat  = material.tangent_stiffness(&f_grad, &ctx);
+                    let ke     = b_mat.transpose() * c_mat * &b_mat * det_j * *weight;
+
+                    for r in 0..E::N_NODES {
+                        for s in 0..E::N_NODES {
+                            let gr = nodes[r];
+                            let gs = nodes[s];
+                            for dr in 0..ndof {
+                                for dc in 0..ndof {
+                                    let i   = ndof * gr + dr;
+                                    let j   = ndof * gs + dc;
+                                    let idx = self.entry_map[&(i, j)];
+                                    let v   = ke[(ndof * r + dr, ndof * s + dc)];
+                                    atomic_values[idx].fetch_update(
+                                        Ordering::Relaxed, Ordering::Relaxed,
+                                        |old| Some((f64::from_bits(old) + v).to_bits()),
+                                    ).unwrap();
+                                }
                             }
                         }
                     }
@@ -154,72 +251,80 @@ impl Assembler {
     }
 
     /// Assembles the internal forces vector f_int.
+    /// f_int_i = sum_e sum_g P^T * grad(N_i) * det_J(g) * w(g)
+    /// where P = F * S is the first Piola-Kirchhoff stress.
+    /// Vector size is N_DOF * n_nodes.
     pub fn assemble_internal_forces(
         &self,
-        mesh:     &Mesh,
+        mesh:     &impl FemMesh,
         material: &dyn MaterialLaw,
         u:        &DVector<f64>,
         sim_ctx:  &SimulationContext,
     ) -> DVector<f64> {
-        let n = 3 * mesh.nodes.len();
-        let mut f_int = DVector::zeros(n);
+        let ndof = <E::Dof as DofType>::N_DOF;
+        let mut f_int    = DVector::zeros(ndof * mesh.n_nodes());
+        let gauss_points = E::integration_points();
 
-        for (elem_idx, &[a, b, c, d]) in self.connectivity.iter().enumerate() {
+        for (elem_idx, nodes) in self.connectivity.iter().enumerate() {
             let geo = &self.geometry[elem_idx];
-            if geo.volume < 1e-10 { continue; }
 
-            let u0 = Self::node_displacement(u, a);
-            let u1 = Self::node_displacement(u, b);
-            let u2 = Self::node_displacement(u, c);
-            let u3 = Self::node_displacement(u, d);
+            let displacements: Vec<_> = nodes.iter()
+                .map(|&i| Self::node_displacement(u, i))
+                .collect();
 
-            let f_grad = compute_deformation_gradient(&u0, &u1, &u2, &u3, &geo.b, &geo.c, &geo.d);
-            let mut ctx = sim_ctx.material_context_for(elem_idx);
-            let s = material.pk2_stress(&f_grad, &mut ctx);
-            let p = f_grad * s;
+            for (g_idx, (_xi, weight)) in gauss_points.iter().enumerate() {
+                let grad_n  = E::shape_gradients(geo, g_idx);
+                let f_grad  = E::deformation_gradient(&grad_n, &displacements);
+                let det_j   = E::gauss_det_j(geo, g_idx);
+                let mut ctx = sim_ctx.material_context_for(elem_idx);
+                let s       = material.pk2_stress(&f_grad, &mut ctx);
+                let p       = f_grad * s;
 
-            let global_indices = [a, b, c, d];
-            for i in 0..4 {
-                let grad_n   = nalgebra::Vector3::new(geo.b[i], geo.c[i], geo.d[i]);
-                let f_node   = geo.volume * p.transpose() * grad_n;
-                let global_i = global_indices[i];
-                f_int[3 * global_i]     += f_node[0];
-                f_int[3 * global_i + 1] += f_node[1];
-                f_int[3 * global_i + 2] += f_node[2];
+                for i in 0..E::N_NODES {
+                    let grad_ni  = grad_n.row(i).transpose();
+                    let f_node   = det_j * weight * p.transpose() * grad_ni;
+                    let global_i = nodes[i];
+                    // Scatter the 3 translational DOFs — for Vec6Dof elements,
+                    // rotational contributions are handled in the B-matrix and
+                    // do not appear in f_int via the PK1 path.
+                    f_int[ndof * global_i]     += f_node[0];
+                    f_int[ndof * global_i + 1] += f_node[1];
+                    f_int[ndof * global_i + 2] += f_node[2];
+                }
             }
         }
         f_int
     }
 
-
     /// Updates internal variables for all elements after Newton convergence.
-    /// Calls `material.update_state` once per element — no-op for elastic materials.
+    /// No-op for elastic materials (sim_ctx.iv is None).
     /// Must be called once per time step after the Newton loop converges.
+    /// Uses the first Gauss point only — consistent with single-point Tet4 convention.
+    /// Will be extended to per-Gauss-point update when InternalVariables supports it.
     pub fn update_internal_variables(
         &self,
-        mesh:     &Mesh,
+        mesh:     &impl FemMesh,
         material: &dyn MaterialLaw,
         u:        &DVector<f64>,
         sim_ctx:  &mut SimulationContext,
     ) {
         if sim_ctx.iv.is_none() { return; }
 
-        for (elem_idx, &[a, b, c, d]) in self.connectivity.iter().enumerate() {
+        for (elem_idx, nodes) in self.connectivity.iter().enumerate() {
             let geo = &self.geometry[elem_idx];
-            if geo.volume < 1e-10 { continue; }
 
-            let u0 = Self::node_displacement(u, a);
-            let u1 = Self::node_displacement(u, b);
-            let u2 = Self::node_displacement(u, c);
-            let u3 = Self::node_displacement(u, d);
+            let displacements: Vec<_> = nodes.iter()
+                .map(|&i| Self::node_displacement(u, i))
+                .collect();
 
-            let f_grad = compute_deformation_gradient(
-                &u0, &u1, &u2, &u3,
-                &geo.b, &geo.c, &geo.d,
-            );
-
+            // Use first Gauss point for state update — single-point convention.
+            let grad_n  = E::shape_gradients(geo, 0);
+            let f_grad  = E::deformation_gradient(&grad_n, &displacements);
             let mut ctx = sim_ctx.material_context_for_mut(elem_idx);
             material.update_state(&f_grad, &mut ctx);
         }
+
+        // Suppress unused variable warning — mesh used for node count in other methods.
+        let _ = mesh.n_nodes();
     }
 }

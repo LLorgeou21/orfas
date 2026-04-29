@@ -14,6 +14,7 @@ pub mod anisotropic;
 pub mod internal_variables;
 pub mod viscoelastic;
 pub mod consistency;
+pub mod linear_elastic;
 
 
 #[cfg(test)]
@@ -33,3 +34,4 @@ pub use internal_variables::{InternalVariables, ElementInternalVars};
 pub use anisotropic::NoAnisotropy;
 pub use viscoelastic::ViscoelasticMaterial;
 pub use consistency::check_thermodynamic_consistency;
+pub use linear_elastic::LinearElastic;

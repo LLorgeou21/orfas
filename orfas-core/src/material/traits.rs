@@ -50,6 +50,21 @@ pub trait MaterialLaw: Sync {
     /// Called once per time step by the assembler via `update_internal_variables`.
     /// Default no-op — elastic materials do not override this.
     fn update_state(&self, _f: &Matrix3<f64>, _ctx: &mut MaterialContext) {}
+
+    /// Young's modulus (Pa). Used by structural elements (Beam2, Shell).
+    /// Default returns 0.0 — override for materials used with beam/shell elements.
+    fn youngs_modulus(&self) -> f64 { 0.0 }
+
+    /// Poisson's ratio. Used by structural elements (Beam2, Shell).
+    /// Default returns 0.0 — override for materials used with beam/shell elements.
+    fn poisson_ratio(&self) -> f64 { 0.0 }
+
+    /// Beam cross-section radius (m) for circular sections.
+    /// Used by Beam2::element_stiffness to compute A, I, J.
+    /// Returns None by default — Beam2 falls back to 0.01 m.
+    fn beam_radius(&self) -> Option<f64> { None }
+
+    fn shell_thickness(&self) -> Option<f64> { None }
 }
 
 // ─── IsochoricPart ────────────────────────────────────────────────────────────

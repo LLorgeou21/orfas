@@ -76,4 +76,8 @@ impl MaterialLaw for SaintVenantKirchhoff {
         let (lambda, mu) = lame(self.youngs_modulus, self.poisson_ratio);
         hooke_voigt(lambda, mu)
     }
+
+    fn youngs_modulus(&self) -> f64 { self.youngs_modulus }
+    fn poisson_ratio(&self)  -> f64 { self.poisson_ratio }
+    
 }
