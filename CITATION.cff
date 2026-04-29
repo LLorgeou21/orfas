@@ -8,8 +8,8 @@ authors:
     github: LLorgeou21
 repository-code: https://github.com/LLorgeou21/orfas
 license: Apache-2.0
-version: 0.7.1
-date-released: "2026-04-24"
+version: 0.8.1
+date-released: "2026-04-29"
 abstract: >
   ORFAS is an open-source Finite Element Method framework implemented in Rust,
   designed for soft tissue simulation in medical and surgical applications.
